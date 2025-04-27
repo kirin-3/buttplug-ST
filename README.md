@@ -1,4 +1,4 @@
-Simple script for connecting SillyTaven with buttplug.io using [https://github.com/intiface/intiface-central]intiface-central and [https://github.com/p-e-w/sorcery]Sorcery.
+Simple script for connecting SillyTaven with buttplug.io using [Intiface Central](https://github.com/intiface/intiface-centralintiface-central) and [Sorcery](https://github.com/p-e-w/sorcerySorcery).
 
 Example for sorcery:
 ```js
