@@ -42,33 +42,23 @@ async def vibrate():
     try:
         speed = float(request.args.get('speed', 0.5))
         speed = max(0.0, min(speed, 1.0))
-        position = float(request.args.get('position', 0.0))
-        position = max(0.0, min(position, 1.0))
-        duration = float(request.args.get('duration', 0))  # seconds
-
-        print(f"Sending vibrate command at speed {speed}, position {position} for {duration} seconds")
+        duration = float(request.args.get('duration', 0))  # duration in seconds (default: 0 = no limit)
+        print(f"Sending vibrate command at speed {speed} for {duration} seconds")
 
         actuator = device.actuators[0]
-        # Try sending both speed and position if supported
-        try:
-            await actuator.command(speed, position)
-        except TypeError:
-            # Fallback: send only speed if position is not supported
-            await actuator.command(speed)
+        await actuator.command(speed)
         print("Vibrate command sent")
 
+        # If a duration is specified, schedule a stop
         if duration > 0:
             async def stop_after_delay():
                 await asyncio.sleep(duration)
                 await actuator.command(0)
                 print("Vibration stopped after time limit")
+
             asyncio.create_task(stop_after_delay())
 
-        return (
-            f"Vibrating at {speed*100:.0f}% power"
-            + f", position {position*100:.0f}%"
-            + (f" for {duration} seconds" if duration > 0 else "")
-        )
+        return f"Vibrating at {speed*100:.0f}% power" + (f" for {duration} seconds" if duration > 0 else "")
     except Exception as e:
         print(f"Exception: {e}")
         return str(e), 500
@@ -81,6 +71,20 @@ async def stop():
     try:
         await device.stop()
         return "Device stopped"
+    except Exception as e:
+        return str(e), 500
+
+@app.route("/linear")
+async def linear():
+    if not device:
+        return "Device not ready", 500
+
+    try:
+        position = float(request.args.get('position', 0.5))
+        duration = int(request.args.get('duration', 1000))
+        position = max(0.0, min(position, 1.0))
+        await device.send_linear_cmd([(0, position, duration)])
+        return f"Moving to position {position*100:.0f}% over {duration}ms"
     except Exception as e:
         return str(e), 500
 
