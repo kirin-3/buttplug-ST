@@ -1,0 +1,13 @@
+[server]
+host = "localhost"
+port = 3069
+debug = false
+
+[websocket]
+url = "ws://127.0.0.1:12345"
+scan_timeout = 2
+
+[device]
+default_speed = 0.5
+default_position = 0.5
+default_duration = 0 

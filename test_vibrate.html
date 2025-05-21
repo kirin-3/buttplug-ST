@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ButtplugST API Test</title>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            max-width: 600px;
+            margin: 20px auto;
+            padding: 20px;
+        }
+        button {
+            padding: 10px 15px;
+            margin: 5px;
+            cursor: pointer;
+        }
+        #response {
+            margin-top: 20px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            min-height: 100px;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <h2>ButtplugST API Test</h2>
+    
+    <div>
+        <h3>Vibrate Test</h3>
+        <label>Speed (0.0-1.0):</label>
+        <input id="speed" type="number" min="0" max="1" step="0.1" value="0.7">
+        <br><br>
+        
+        <label>Position (0.0-1.0):</label>
+        <input id="position" type="number" min="0" max="1" step="0.1" value="0.5">
+        <br><br>
+        
+        <label>Duration (seconds):</label>
+        <input id="duration" type="number" min="0" step="1" value="5">
+        <br><br>
+        
+        <button onclick="testVibrate()">Test Vibrate</button>
+        <button onclick="stopVibrate()">Stop All</button>
+    </div>
+    
+    <div>
+        <h3>Response:</h3>
+        <pre id="response">No response yet</pre>
+    </div>
+    
+    <script>
+        async function testVibrate() {
+            const speed = document.getElementById('speed').value;
+            const position = document.getElementById('position').value;
+            const duration = document.getElementById('duration').value;
+            
+            const url = `http://localhost:3069/vibrate?speed=${speed}&position=${position}&duration=${duration}`;
+            document.getElementById('response').textContent = `Sending request to: ${url}`;
+            
+            try {
+                const response = await fetch(url);
+                const data = await response.json();
+                document.getElementById('response').textContent = JSON.stringify(data, null, 2);
+            } catch (error) {
+                document.getElementById('response').textContent = `Error: ${error.message}`;
+            }
+        }
+        
+        async function stopVibrate() {
+            try {
+                const response = await fetch('http://localhost:3069/stop');
+                const data = await response.json();
+                document.getElementById('response').textContent = JSON.stringify(data, null, 2);
+            } catch (error) {
+                document.getElementById('response').textContent = `Error: ${error.message}`;
+            }
+        }
+    </script>
+</body>
+</html> 
