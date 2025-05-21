@@ -29,7 +29,7 @@ pip install -r requirements.txt
 
 3. Run the server:
 ```bash
-python -m buttplug_st.app
+python -m run.py
 ```
 
 Or use the included run script with options:
@@ -64,7 +64,7 @@ default_duration = 0
 
 ## Usage with SillyTavern Sorcery
 
-Add Sorcery commands to your SillyTavern configuration like these examples:
+Add Sorcery commands to your SillyTavern configuration(Run this JavaScript) like these examples:
 
 ### Basic vibration
 ```js
