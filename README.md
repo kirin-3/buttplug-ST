@@ -17,6 +17,7 @@ This bridge allows you to control devices via [Intiface Central](https://github.
 ## Tested With
 
 ✅ Lovense Edge
+
 ✅ Lovense Hush 2
 
 ## Installation
