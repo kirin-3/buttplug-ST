@@ -14,6 +14,11 @@ This bridge allows you to control devices via [Intiface Central](https://github.
 - Detailed status endpoint for diagnostics
 - Robust error handling and reconnection
 
+## Tested With
+
+✅ Lovense Edge
+✅ Lovense Hush 2
+
 ## Installation
 
 1. Clone the repository:
@@ -29,7 +34,7 @@ pip install -r requirements.txt
 
 3. Run the server:
 ```bash
-python -m run.py
+python run.py
 ```
 
 Or use the included run script with options:
