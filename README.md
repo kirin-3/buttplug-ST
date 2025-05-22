@@ -77,7 +77,7 @@ Install Sorcery from [p-e-w/sorcery](https://github.com/p-e-w/sorcery) into Sill
 
 Open the Sorcery tab from top menu.
 
-Add Sorcery commands to your SillyTavern configuration(Run this JavaScript) like these examples:
+Add Sorcery commands (Run this JavaScript) like these examples:
 
 ### Basic vibration
 ```js
