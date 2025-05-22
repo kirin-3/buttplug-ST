@@ -33,7 +33,8 @@ cd buttplug-st
 pip install -r requirements.txt
 ```
 
-3. Start Your Intiface Server
+3. Start your Intiface server
+By default it should be using "ws://127.0.0.1:12345" if it is not, you can change the url in `buttplug_st/config/default.toml`.
 
 4. Run the server:
 ```bash
