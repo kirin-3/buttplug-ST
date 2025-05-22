@@ -38,6 +38,7 @@ virtualenv/
 .project
 .pydevproject
 .settings/
+.cursor/
 
 # Log files
 *.log

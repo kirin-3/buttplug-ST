@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
 """
 ButtplugST launcher script
+
+This script launches the ButtplugST server which acts as a bridge between 
+SillyTavern and buttplug.io devices.
 """
 import asyncio
 import argparse
 import os
 import sys
+from typing import Optional, Dict, Any
 
-def parse_args():
-    parser = argparse.ArgumentParser(description='ButtplugST - Bridge between SillyTavern and buttplug.io')
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments for ButtplugST server"""
+    parser = argparse.ArgumentParser(
+        description='ButtplugST - Bridge between SillyTavern and buttplug.io'
+    )
     parser.add_argument('--config', '-c', help='Path to config file')
     parser.add_argument('--host', '-H', help='Server host')
     parser.add_argument('--port', '-p', type=int, help='Server port')
@@ -16,7 +24,9 @@ def parse_args():
     parser.add_argument('--websocket', '-w', help='Intiface websocket URL')
     return parser.parse_args()
 
-async def main():
+
+async def main() -> None:
+    """Main entry point for the application"""
     args = parse_args()
     
     # Set environment variables from command line args
@@ -40,6 +50,7 @@ async def main():
     print("Press Ctrl+C to exit")
     
     await app_main()
+
 
 if __name__ == "__main__":
     try:

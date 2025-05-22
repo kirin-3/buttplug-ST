@@ -33,7 +33,9 @@ cd buttplug-st
 pip install -r requirements.txt
 ```
 
-3. Run the server:
+3. Start Your Intiface Server
+
+4. Run the server:
 ```bash
 python run.py
 ```

@@ -5,8 +5,9 @@ import sys
 import platform
 from functools import partial
 import signal
+from typing import Callable, Optional, Dict, Any
 
-from quart import Quart, jsonify
+from quart import Quart, jsonify, Response
 from quart_cors import cors
 
 from .config import Settings
@@ -22,7 +23,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def create_app(settings: Settings) -> Quart:
-    """Create and configure the Quart application"""
+    """
+    Create and configure the Quart application
+    
+    Args:
+        settings: Application settings
+        
+    Returns:
+        Configured Quart application instance
+    """
     app = Quart(__name__)
     
     # Enable CORS
@@ -37,11 +46,13 @@ def create_app(settings: Settings) -> Quart:
     
     # Error handlers
     @app.errorhandler(ButtplugSTException)
-    async def handle_buttplug_exception(e):
+    async def handle_buttplug_exception(e: ButtplugSTException) -> tuple[Response, int]:
+        """Handle custom ButtplugST exceptions"""
         return jsonify(e.to_dict()), e.status_code
     
     @app.errorhandler(Exception)
-    async def handle_generic_exception(e):
+    async def handle_generic_exception(e: Exception) -> tuple[Response, int]:
+        """Handle all other exceptions"""
         logger.error(f"Unhandled exception: {e}", exc_info=True)
         return jsonify({
             "error": "internal_error",
@@ -51,7 +62,8 @@ def create_app(settings: Settings) -> Quart:
     
     # Startup/Shutdown handlers
     @app.before_serving
-    async def startup():
+    async def startup() -> None:
+        """Initialize the device manager before serving requests"""
         logger.info("Starting up ButtplugST server...")
         try:
             await device_mgr.initialize()
@@ -60,7 +72,8 @@ def create_app(settings: Settings) -> Quart:
             logger.error(f"Error during startup: {e}", exc_info=True)
     
     @app.after_serving
-    async def shutdown():
+    async def shutdown() -> None:
+        """Shut down the device manager when the server stops"""
         logger.info("Shutting down ButtplugST server...")
         await device_mgr.shutdown()
         logger.info("ButtplugST server stopped")
@@ -68,12 +81,19 @@ def create_app(settings: Settings) -> Quart:
     app.device_manager = device_mgr
     return app
 
-def handle_signal(app, loop, signal_name):
-    """Handle termination signals"""
+def handle_signal(app: Quart, loop: asyncio.AbstractEventLoop, signal_name: str) -> None:
+    """
+    Handle termination signals
+    
+    Args:
+        app: The Quart application
+        loop: Event loop running the application
+        signal_name: Name of the received signal
+    """
     logger.info(f"Received {signal_name}, shutting down...")
     loop.create_task(app.shutdown())
 
-async def main():
+async def main() -> None:
     """Main application entry point"""
     # Load settings
     settings = Settings.load()
