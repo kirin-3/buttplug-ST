@@ -34,7 +34,7 @@ pip install -r requirements.txt
 ```
 
 3. Start your Intiface server
-By default it should be using "ws://127.0.0.1:12345" if it is not, you can change the url in `buttplug_st/config/default.toml`.
+By default it should be using `ws://127.0.0.1:12345` if it is not, you can change the url in `buttplug_st/config/default.toml`.
 
 4. Run the server:
 ```bash
@@ -72,6 +72,10 @@ default_duration = 0
 ```
 
 ## Usage with SillyTavern Sorcery
+
+Install Sorcery from [p-e-w/sorcery](https://github.com/p-e-w/sorcery) into SillyTavern.
+
+Open the Sorcery tab from top menu.
 
 Add Sorcery commands to your SillyTavern configuration(Run this JavaScript) like these examples:
 
