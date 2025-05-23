@@ -20,6 +20,8 @@ This bridge allows you to control devices via [Intiface Central](https://github.
 
 ✅ Lovense Hush 2
 
+### A more user friendly installation guide can be found [here on my blog](https://kirin.pw/posts/sillytavern-buttplug/).
+
 ## Installation
 
 1. Clone the repository:
