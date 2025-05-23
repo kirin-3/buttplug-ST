@@ -16,7 +16,7 @@ This bridge allows you to control devices via [Intiface Central](https://github.
 
 ## Tested With
 
-✅ Lovense Edge
+✅ Lovense Edge 2
 
 ✅ Lovense Hush 2
 
@@ -24,7 +24,7 @@ This bridge allows you to control devices via [Intiface Central](https://github.
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/buttplug-st.git
+git clone https://github.com/kirin-3/buttplug-st.git
 cd buttplug-st
 ```
 
