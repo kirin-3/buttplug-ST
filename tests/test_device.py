@@ -257,6 +257,42 @@ async def test_vibrate_position_reported_not_applied_on_vibration_only_device():
     assert [c.output_type.value for c in toy.outputs_sent] == ["Vibrate"]
 
 
+async def test_vibrate_position_falls_back_to_plain_position():
+    client = FakeButtplugClient()
+    manager = make_manager(client)
+    await manager.start()
+    toy = FakeDevice(1, "Positioner", outputs=("Vibrate", "Position"))
+    await client.add_device(toy)
+
+    result = await manager.vibrate(0.5, position=1.0)
+    assert result["position_applied"] is True
+    types = [c.output_type.value for c in toy.outputs_sent]
+    assert types == ["Vibrate", "Position"]
+    assert toy.outputs_sent[1].duration is None  # plain position has no duration
+
+
+async def test_vibrate_on_non_vibrating_device_raises_not_found():
+    client = FakeButtplugClient()
+    manager = make_manager(client)
+    await manager.start()
+    await client.add_device(FakeDevice(1, "Rotator", outputs=("Rotate",)))
+    with pytest.raises(DeviceNotFoundError):
+        await manager.vibrate(0.5)
+    with pytest.raises(DeviceNotFoundError):
+        await manager.vibrate(0.0)  # speed-0 path gets the same treatment
+
+
+async def test_actuator_count_counts_features_not_types():
+    client = FakeButtplugClient()
+    manager = make_manager(client)
+    await manager.start()
+    dual = FakeDevice(1, "Dual Motor", feature_count=2)
+    await client.add_device(dual)
+    info = manager.list_devices()[0]
+    assert info.actuator_count == 2  # legacy semantics: features, not distinct types
+    assert info.actuator_types == ["Vibrate"]
+
+
 async def test_vibrate_with_no_devices_raises_not_found():
     client = FakeButtplugClient()
     manager = make_manager(client)

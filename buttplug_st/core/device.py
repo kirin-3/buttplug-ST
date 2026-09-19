@@ -214,18 +214,20 @@ class DeviceManager:
         return None
 
     def _device_info(self, device: ButtplugDevice, index: int) -> DeviceInfo:
+        output_features = [f for f in device.features.values() if f.outputs]
         output_types: set[str] = set()
-        for feature in device.features.values():
-            if feature.outputs:
-                output_types.update(feature.outputs.keys())
+        for feature in output_features:
+            output_types.update(feature.outputs.keys())
         return DeviceInfo(
             id=str(device.index),
             name=device.name,
             index=index,
-            actuator_count=len(output_types),
+            # Legacy servers counted actuator features (a dual-motor vibrator -> 2).
+            actuator_count=len(output_features),
             actuator_types=sorted(output_types),
             server_index=device.index,
-            supports_position=device.has_output(OutputType.POSITION_WITH_DURATION),
+            supports_position=device.has_output(OutputType.POSITION_WITH_DURATION)
+            or device.has_output(OutputType.POSITION),
         )
 
     # ---------- scan ----------
@@ -271,6 +273,9 @@ class DeviceManager:
         device = self._active_device_object()
         if device is None:
             raise DeviceNotFoundError()
+        if not device.has_output(OutputType.VIBRATE):
+            # Legacy servers answered 404 when the active device could not vibrate.
+            raise DeviceNotFoundError(f"{device.name} has no vibration outputs")
 
         speed = min(1.0, max(0.0, speed))
         result: dict = {"success": True, "device": device.name, "speed": speed}
@@ -298,6 +303,9 @@ class DeviceManager:
                         duration=POSITION_MOVE_MS,
                     )
                 )
+                result["position_applied"] = True
+            elif device.has_output(OutputType.POSITION):
+                commands.append(DeviceOutputCommand(OutputType.POSITION, position))
                 result["position_applied"] = True
             else:
                 result["position_applied"] = False

@@ -113,13 +113,10 @@ class Settings(BaseModel):
         :class:`SettingsError` naming the file; defaults are never silently
         substituted for an explicitly requested file.
         """
-        if config_path is None:
-            data = _load_toml(DEFAULT_CONFIG_PATH)
-        else:
-            path = Path(config_path)
-            if not path.is_file():
-                raise SettingsError(f"config file not found: {path}")
-            data = _load_toml(path)
+        path = Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
+        if config_path is not None and not path.is_file():
+            raise SettingsError(f"config file not found: {path}")
+        data = _load_toml(path)
         try:
             settings = cls.model_validate(data)
         except PydanticValidationError as exc:

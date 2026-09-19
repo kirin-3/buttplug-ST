@@ -231,6 +231,34 @@ async def test_post_vibrate_out_of_range_speed_maps_to_400():
         assert "speed" in body["detail"]
 
 
+async def test_get_vibrate_position_parity():
+    client = FakeButtplugClient()
+    app, _ = make_app(client)
+    async with app.test_app() as test_app:
+        test_client = test_app.test_client()
+        toy = FakeDevice(1, "Toy A", outputs=("Vibrate", "Position"))
+        await client.add_device(toy)
+
+        response = await test_client.get("/vibrate?speed=0.5&position=1.0")
+        assert response.status_code == 200
+        body = await get_json(response)
+        assert body["message"] == "Vibrating at 50% power, position 100%"
+        assert body["data"]["position"] == 1.0
+        assert body["data"]["position_applied"] is True
+
+
+async def test_vibrate_on_non_vibrating_device_maps_to_404():
+    client = FakeButtplugClient()
+    app, _ = make_app(client)
+    async with app.test_app() as test_app:
+        test_client = test_app.test_client()
+        await client.add_device(FakeDevice(1, "Rotator", outputs=("Rotate",)))
+        response = await test_client.get("/vibrate?speed=0.5")
+        assert response.status_code == 404
+        body = await get_json(response)
+        assert body["error"] == "device_not_found"
+
+
 # ---------- status-code mapping ----------
 
 
