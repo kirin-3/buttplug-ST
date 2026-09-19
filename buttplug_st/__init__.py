@@ -1,9 +1,10 @@
 """
-ButtplugST - Bridge between SillyTavern and buttplug.io devices
+ButtplugST - REST bridge between SillyTavern and buttplug.io devices via Intiface Central.
 """
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError, version
 
-from .config import Settings
-from .core import DeviceManager, DeviceInfo
-from .api import create_blueprint 
+try:
+    __version__ = version("buttplug-st")
+except PackageNotFoundError:  # package not installed (e.g. running from a raw checkout)
+    __version__ = "0.0.0.dev0"

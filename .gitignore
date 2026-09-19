@@ -59,12 +59,16 @@ desktop.ini
 htmlcov/
 .pytest_cache/
 .hypothesis/
+.ruff_cache/
 
 # Other
 .directory
 *~
 *.bak
 *.tmp
+openspec/
+.zcode/
+.zcodeignore
 
 # C extensions
 *.so
