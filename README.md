@@ -26,6 +26,8 @@ ButtplugST runs a small HTTP server on `localhost:3069` and translates requests 
 
 ✅ Lovense Hush 2
 
+✅ Lovense Lush 2
+
 *In theory it should work with any buttplug.io supported device.*
 
 ### A more user friendly installation guide can be found [here on my blog](https://kirin.pw/posts/sillytavern-buttplug/).
