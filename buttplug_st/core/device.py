@@ -278,11 +278,13 @@ class DeviceManager:
             raise DeviceNotFoundError(f"{device.name} has no vibration outputs")
 
         speed = min(1.0, max(0.0, speed))
+        # Any new vibration command replaces the previous one's auto-stop, even
+        # when this command is indefinite (duration 0) and schedules no timer.
+        await self._cancel_auto_stop()
         result: dict = {"success": True, "device": device.name, "speed": speed}
 
         if speed == 0.0:
             # Speed 0 silences the device, same as stop.
-            await self._cancel_auto_stop()
             try:
                 await device.run_output(DeviceOutputCommand(OutputType.VIBRATE, 0.0))
             except ButtplugError as exc:

@@ -82,6 +82,23 @@ def test_float_env_override(monkeypatch: pytest.MonkeyPatch):
     assert Settings.load().device.default_speed == 0.9
 
 
+def test_int_env_override_rejected_outside_field_bounds(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("BUTTPLUG_SERVER_PORT", "99999")
+    with pytest.raises(SettingsError, match="BUTTPLUG_SERVER_PORT"):
+        Settings.load()
+
+
+def test_float_env_override_rejected_outside_field_bounds(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("BUTTPLUG_DEVICE_DEFAULT_SPEED", "7.5")
+    with pytest.raises(SettingsError, match="BUTTPLUG_DEVICE_DEFAULT_SPEED"):
+        Settings.load()
+
+
+def test_cli_flag_rejected_outside_field_bounds():
+    with pytest.raises(SettingsError, match="server.port"):
+        load_settings(["--port", "99999"])
+
+
 def test_env_beats_config_file(monkeypatch: pytest.MonkeyPatch, tmp_path):
     cfg = tmp_path / "user.toml"
     cfg.write_text("[server]\nport = 4000\n", encoding="utf-8")

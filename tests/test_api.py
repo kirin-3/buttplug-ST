@@ -259,6 +259,31 @@ async def test_vibrate_on_non_vibrating_device_maps_to_404():
         assert body["error"] == "device_not_found"
 
 
+async def test_post_vibrate_malformed_body_maps_to_400_not_defaults():
+    client = FakeButtplugClient()
+    app, _ = make_app(client)
+    async with app.test_app() as test_app:
+        test_client = test_app.test_client()
+        toy = FakeDevice(1, "Toy A")
+        await client.add_device(toy)
+
+        # A truncated payload must never silently vibrate at the default speed.
+        response = await test_client.post("/vibrate", data='{"speed": 0')
+        assert response.status_code == 400
+        body = await get_json(response)
+        assert body["error"] == "validation_error"
+
+        # An absent body is fine and uses the defaults.
+        response = await test_client.post("/vibrate")
+        assert response.status_code == 200
+        body = await get_json(response)
+        assert body["data"]["speed"] == 0.5
+
+        # A non-object JSON body is also a 400.
+        response = await test_client.post("/vibrate", json=[0.7])
+        assert response.status_code == 400
+
+
 # ---------- status-code mapping ----------
 
 

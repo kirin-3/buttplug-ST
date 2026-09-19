@@ -344,6 +344,31 @@ async def test_overlapping_vibrate_leaves_exactly_one_timer():
     assert toy.stop_calls == 1  # silenced exactly once, by the fresh timer
 
 
+async def test_indefinite_vibrate_cancels_pending_timer():
+    sleep = GatedSleep()
+    sleep.gate.clear()
+    client = FakeButtplugClient()
+    manager = make_manager(client, sleep=sleep)
+    await manager.start()
+    toy = FakeDevice(1)
+    await client.add_device(toy)
+
+    await manager.vibrate(0.8, duration=30.0)
+    stale_timer = manager._auto_stop_task
+    await asyncio.sleep(0)  # let the timer start sleeping
+
+    # A new indefinite command must not inherit the previous auto-stop.
+    await manager.vibrate(0.6)
+    assert manager._auto_stop_task is None
+    assert stale_timer.cancelled()
+    assert toy.outputs_sent[-1].value == pytest.approx(0.6)
+
+    sleep.gate.set()  # the stale timer must never fire
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert toy.stop_calls == 0
+
+
 async def test_stop_cancels_pending_auto_stop():
     sleep = GatedSleep()
     sleep.gate.clear()

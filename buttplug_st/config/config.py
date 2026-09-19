@@ -54,7 +54,7 @@ _ENV_PARSERS: dict[type, Any] = {
 class ServerConfig(BaseModel):
     """HTTP server settings."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     host: str = Field(default="localhost", description="HTTP host to bind")
     port: int = Field(default=3069, ge=1, le=65535, description="HTTP port to bind")
@@ -64,7 +64,7 @@ class ServerConfig(BaseModel):
 class WebsocketConfig(BaseModel):
     """Intiface Central connection settings."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     url: str = Field(
         default="ws://127.0.0.1:12345",
@@ -80,7 +80,7 @@ class WebsocketConfig(BaseModel):
 class DeviceConfig(BaseModel):
     """Default device command parameters."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     default_speed: float = Field(default=0.5, ge=0.0, le=1.0, description="Default vibration speed")
     default_position: float = Field(
@@ -99,7 +99,7 @@ class DeviceConfig(BaseModel):
 class Settings(BaseModel):
     """Effective runtime settings."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     server: ServerConfig = Field(default_factory=ServerConfig)
     websocket: WebsocketConfig = Field(default_factory=WebsocketConfig)
@@ -133,7 +133,12 @@ class Settings(BaseModel):
             for key, value in fields.items():
                 if key not in type(section).model_fields:
                     raise SettingsError(f"unknown settings key: {section_name}.{key}")
-                setattr(section, key, value)
+                try:
+                    setattr(section, key, value)
+                except PydanticValidationError as exc:
+                    raise SettingsError(
+                        f"invalid value for {section_name}.{key}: {_describe_validation_error(exc)}"
+                    ) from exc
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
@@ -155,7 +160,11 @@ def _apply_env_overrides(settings: Settings) -> None:
             if raw is None:
                 continue
             annotation = type(section).model_fields[field_name].annotation
-            setattr(section, field_name, _coerce_env_value(var, raw, annotation))
+            value = _coerce_env_value(var, raw, annotation)
+            try:
+                setattr(section, field_name, value)
+            except PydanticValidationError as exc:
+                raise SettingsError(f"{var}: {_describe_validation_error(exc)}") from exc
 
 
 def _coerce_env_value(var: str, raw: str, annotation: Any) -> Any:
@@ -168,3 +177,10 @@ def _coerce_env_value(var: str, raw: str, annotation: Any) -> Any:
         raise SettingsError(
             f"{var}: invalid value {raw!r} for type {getattr(annotation, '__name__', annotation)}"
         ) from exc
+
+
+def _describe_validation_error(exc: PydanticValidationError) -> str:
+    return "; ".join(
+        f"{'.'.join(str(part) for part in error['loc']) or 'value'}: {error['msg']}"
+        for error in exc.errors()
+    )

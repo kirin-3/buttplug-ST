@@ -9,6 +9,7 @@ error handlers — routes raise domain exceptions and return only successes.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -27,6 +28,23 @@ def create_blueprint(device_manager: DeviceManager) -> Blueprint:
     """Create a blueprint with all API routes."""
     api_bp = Blueprint("api", __name__)
 
+    async def parse_json_body() -> dict[str, Any]:
+        """Parse the request body as a JSON object.
+
+        An absent/empty body yields {} (the endpoint's defaults apply); a
+        malformed body is a 400 — never silently replaced by defaults.
+        """
+        raw = await request.get_data()
+        if not raw.strip():
+            return {}
+        try:
+            body = json.loads(raw)
+        except ValueError as exc:
+            raise ValidationError("Request body must be valid JSON") from exc
+        if not isinstance(body, dict):
+            raise ValidationError("Request body must be a JSON object")
+        return body
+
     def device_payload(info) -> dict[str, Any]:
         return {
             "id": info.id,
@@ -43,12 +61,7 @@ def create_blueprint(device_manager: DeviceManager) -> Blueprint:
                 key: value for key, value in request.args.items() if key in _VIBRATE_PARAMS
             }
             return VibrateRequest.model_validate(raw)
-        body = await request.get_json(silent=True)
-        if body is None:
-            body = {}
-        if not isinstance(body, dict):
-            raise ValidationError("Request body must be a JSON object")
-        return VibrateRequest.model_validate(body)
+        return VibrateRequest.model_validate(await parse_json_body())
 
     def vibrate_message(req: VibrateRequest) -> str:
         message = f"Vibrating at {req.speed * 100:.0f}% power"
@@ -89,8 +102,7 @@ def create_blueprint(device_manager: DeviceManager) -> Blueprint:
     @api_bp.route("/device", methods=["POST"])
     async def select_device() -> tuple[dict[str, Any], int]:
         """Select the active device by index."""
-        body = await request.get_json(silent=True)
-        req = DeviceSelectionRequest.model_validate(body or {})
+        req = DeviceSelectionRequest.model_validate(await parse_json_body())
         device_info = device_manager.set_active_device(req.index)
         return jsonify(
             {
