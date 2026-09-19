@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import os
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
@@ -20,6 +21,8 @@ DEFAULT_CONFIG_PATH = Path(__file__).parent / "default.toml"
 
 _TRUTHY = {"true", "1", "yes"}
 _FALSY = {"false", "0", "no"}
+
+StrParser = Callable[[str], object]
 
 
 class SettingsError(Exception):
@@ -43,18 +46,23 @@ def _parse_float(raw: str) -> float:
     return float(raw.strip())
 
 
-_ENV_PARSERS: dict[type, Any] = {
-    bool: _parse_bool,
-    int: _parse_int,
-    float: _parse_float,
-    str: str,
+#: Per-section string parsers for BUTTPLUG_* environment variables. Every
+#: settings field must appear here (guarded by a test).
+ENV_FIELD_PARSERS: dict[str, dict[str, StrParser]] = {
+    "server": {"host": str, "port": _parse_int, "debug": _parse_bool},
+    "websocket": {"url": str, "scan_timeout": _parse_float},
+    "device": {
+        "default_speed": _parse_float,
+        "default_position": _parse_float,
+        "default_duration": _parse_float,
+    },
 }
 
 
 class ServerConfig(BaseModel):
     """HTTP server settings."""
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", validate_assignment=True)
 
     host: str = Field(default="localhost", description="HTTP host to bind")
     port: int = Field(default=3069, ge=1, le=65535, description="HTTP port to bind")
@@ -64,7 +72,7 @@ class ServerConfig(BaseModel):
 class WebsocketConfig(BaseModel):
     """Intiface Central connection settings."""
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", validate_assignment=True)
 
     url: str = Field(
         default="ws://127.0.0.1:12345",
@@ -80,7 +88,7 @@ class WebsocketConfig(BaseModel):
 class DeviceConfig(BaseModel):
     """Default device command parameters."""
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", validate_assignment=True)
 
     default_speed: float = Field(default=0.5, ge=0.0, le=1.0, description="Default vibration speed")
     default_position: float = Field(
@@ -99,7 +107,7 @@ class DeviceConfig(BaseModel):
 class Settings(BaseModel):
     """Effective runtime settings."""
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", validate_assignment=True)
 
     server: ServerConfig = Field(default_factory=ServerConfig)
     websocket: WebsocketConfig = Field(default_factory=WebsocketConfig)
@@ -124,11 +132,16 @@ class Settings(BaseModel):
         _apply_env_overrides(settings)
         return settings
 
-    def apply_updates(self, updates: dict[str, dict[str, Any]]) -> None:
+    def apply_updates(self, updates: dict[str, dict[str, object]]) -> None:
         """Apply the highest-precedence layer, ``{section: {field: value}}``."""
+        sections: dict[str, BaseModel] = {
+            "server": self.server,
+            "websocket": self.websocket,
+            "device": self.device,
+        }
         for section_name, fields in updates.items():
-            section = getattr(self, section_name, None)
-            if section is None or not isinstance(section, BaseModel):
+            section = sections.get(section_name)
+            if section is None:
                 raise SettingsError(f"unknown settings section: {section_name}")
             for key, value in fields.items():
                 if key not in type(section).model_fields:
@@ -136,15 +149,17 @@ class Settings(BaseModel):
                 try:
                     setattr(section, key, value)
                 except PydanticValidationError as exc:
+                    detail = _describe_validation_error(exc)
                     raise SettingsError(
-                        f"invalid value for {section_name}.{key}: {_describe_validation_error(exc)}"
+                        f"invalid value for {section_name}.{key}: {detail}"
                     ) from exc
 
 
-def _load_toml(path: Path) -> dict[str, Any]:
+def _load_toml(path: Path) -> dict[str, object]:
     try:
         with open(path, "rb") as fh:
-            return tomllib.load(fh)
+            loaded: dict[str, object] = tomllib.load(fh)
+            return loaded
     except FileNotFoundError as exc:
         raise SettingsError(f"config file not found: {path}") from exc
     except tomllib.TOMLDecodeError as exc:
@@ -152,35 +167,31 @@ def _load_toml(path: Path) -> dict[str, Any]:
 
 
 def _apply_env_overrides(settings: Settings) -> None:
-    for section_name in type(settings).model_fields:
-        section = getattr(settings, section_name)
-        for field_name in type(section).model_fields:
+    sections: dict[str, BaseModel] = {
+        "server": settings.server,
+        "websocket": settings.websocket,
+        "device": settings.device,
+    }
+    for section_name, field_parsers in ENV_FIELD_PARSERS.items():
+        section = sections[section_name]
+        for field_name, parser in field_parsers.items():
             var = f"{ENV_PREFIX}{section_name.upper()}_{field_name.upper()}"
             raw = os.environ.get(var)
             if raw is None:
                 continue
-            annotation = type(section).model_fields[field_name].annotation
-            value = _coerce_env_value(var, raw, annotation)
+            try:
+                value = parser(raw)
+            except ValueError as exc:
+                raise SettingsError(f"{var}: invalid value {raw!r} ({exc})") from exc
             try:
                 setattr(section, field_name, value)
             except PydanticValidationError as exc:
                 raise SettingsError(f"{var}: {_describe_validation_error(exc)}") from exc
 
 
-def _coerce_env_value(var: str, raw: str, annotation: Any) -> Any:
-    parser = _ENV_PARSERS.get(annotation)
-    if parser is None:
-        raise SettingsError(f"{var}: unsupported field type {annotation!r}")
-    try:
-        return parser(raw)
-    except ValueError as exc:
-        raise SettingsError(
-            f"{var}: invalid value {raw!r} for type {getattr(annotation, '__name__', annotation)}"
-        ) from exc
-
-
 def _describe_validation_error(exc: PydanticValidationError) -> str:
-    return "; ".join(
-        f"{'.'.join(str(part) for part in error['loc']) or 'value'}: {error['msg']}"
-        for error in exc.errors()
-    )
+    parts: list[str] = []
+    for error in exc.errors():
+        location = ".".join(str(part) for part in error["loc"]) or "value"
+        parts.append(f"{location}: {error['msg']}")
+    return "; ".join(parts)

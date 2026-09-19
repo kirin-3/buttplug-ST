@@ -14,6 +14,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import TypedDict
 
 from ..config import Settings
 from .buttplug_adapter import (
@@ -33,6 +34,54 @@ POSITION_MOVE_MS = 500
 
 SleepFn = Callable[[float], Awaitable[None]]
 ClockFn = Callable[[], float]
+
+
+class DevicePayload(TypedDict):
+    """Device summary as it appears in API responses."""
+
+    id: str
+    name: str
+    index: int
+    actuator_count: int
+    actuator_types: list[str]
+
+
+class VibrateResult(TypedDict):
+    """Payload of a successful vibration command (always-present keys)."""
+
+    success: bool
+    device: str
+    speed: float
+
+
+class VibrateOptionalResult(VibrateResult, total=False):
+    """Keys that only appear on the vibration payload when applicable."""
+
+    position: float
+    position_applied: bool
+    duration: float
+
+
+class StopResult(TypedDict):
+    """Payload of a successful stop command."""
+
+    success: bool
+    device: str
+    status: str
+
+
+class StatusSnapshot(TypedDict):
+    """Truthful server/device status, any Intiface state."""
+
+    status: str
+    server_running: bool
+    server_initialized: bool
+    intiface_connected: bool
+    client_state: str
+    device_count: int
+    has_devices: bool
+    websocket_url: str
+    active_device: DevicePayload | None
 
 
 @dataclass(frozen=True)
@@ -58,17 +107,19 @@ class DeviceManager:
         sleep_fn: SleepFn = asyncio.sleep,
         clock_fn: ClockFn = time.monotonic,
     ) -> None:
-        self.settings = settings
-        self._client_factory = client_factory if client_factory is not None else ButtplugClient
-        self._sleep = sleep_fn
-        self._clock = clock_fn
+        self.settings: Settings = settings
+        self._client_factory: Callable[[str], ButtplugClient] = (
+            client_factory if client_factory is not None else ButtplugClient
+        )
+        self._sleep: SleepFn = sleep_fn
+        self._clock: ClockFn = clock_fn
         self._client: ButtplugClient | None = None
         self._devices: list[ButtplugDevice] = []  # kept ordered by server index
         self._active_server_index: int | None = None
-        self._auto_stop_task: asyncio.Task | None = None
+        self._auto_stop_task: asyncio.Task[None] | None = None
         self._scan_finished: asyncio.Event | None = None
         self._last_connection_attempt: float | None = None  # None = never attempted
-        self._reconnect_min_interval = 5.0
+        self._reconnect_min_interval: float = 5.0
 
     # ---------- state properties ----------
 
@@ -79,6 +130,11 @@ class DeviceManager:
     @property
     def has_devices(self) -> bool:
         return len(self._devices) > 0
+
+    @property
+    def pending_auto_stop(self) -> asyncio.Task[None] | None:
+        """The auto-stop timer task if one is pending (introspection/tests)."""
+        return self._auto_stop_task
 
     # ---------- lifecycle ----------
 
@@ -103,26 +159,23 @@ class DeviceManager:
         self._active_server_index = None
         logger.debug("Device manager shut down")
 
-    async def ensure_ready(self) -> ButtplugClient:
-        """Return the connected client, attempting one throttled reconnect.
+    async def ensure_ready(self) -> None:
+        """Ensure a connected client, attempting one throttled reconnect.
 
         Raises IntifaceUnavailableError when Intiface is down or the retry
         interval has not elapsed since the last attempt.
         """
         if self.is_connected:
-            assert self._client is not None
-            return self._client
+            return
         await self._connect()
-        assert self._client is not None
-        return self._client
 
     async def _connect(self) -> None:
         if self._last_connection_attempt is not None:
             elapsed = self._clock() - self._last_connection_attempt
             if elapsed < self._reconnect_min_interval:
+                retry_in = self._reconnect_min_interval - elapsed
                 raise IntifaceUnavailableError(
-                    "Intiface Central is not available "
-                    f"(retry allowed in {self._reconnect_min_interval - elapsed:.1f}s)"
+                    f"Intiface Central is not available (retry allowed in {retry_in:.1f}s)"
                 )
         self._last_connection_attempt = self._clock()
 
@@ -214,16 +267,20 @@ class DeviceManager:
         return None
 
     def _device_info(self, device: ButtplugDevice, index: int) -> DeviceInfo:
-        output_features = [f for f in device.features.values() if f.outputs]
+        output_feature_count = 0
         output_types: set[str] = set()
-        for feature in output_features:
-            output_types.update(feature.outputs.keys())
+        for feature in device.features.values():
+            outputs = feature.outputs
+            if outputs is None:
+                continue
+            output_feature_count += 1
+            output_types.update(outputs.keys())
         return DeviceInfo(
             id=str(device.index),
             name=device.name,
             index=index,
             # Legacy servers counted actuator features (a dual-motor vibrator -> 2).
-            actuator_count=len(output_features),
+            actuator_count=output_feature_count,
             actuator_types=sorted(output_types),
             server_index=device.index,
             supports_position=device.has_output(OutputType.POSITION_WITH_DURATION)
@@ -244,10 +301,10 @@ class DeviceManager:
         client = self._client
         assert client is not None
         try:
-            await client.start_scanning()
+            _ = await client.start_scanning()
             # Bounded scan: on timeout report whatever arrived.
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(
+                _ = await asyncio.wait_for(
                     finished.wait(), timeout=self.settings.websocket.scan_timeout
                 )
         except ButtplugError as exc:
@@ -263,7 +320,7 @@ class DeviceManager:
 
     async def vibrate(
         self, speed: float, position: float | None = None, duration: float = 0.0
-    ) -> dict:
+    ) -> VibrateOptionalResult:
         """Vibrate all vibration outputs of the active device.
 
         Position is applied only where the device supports it; the response
@@ -281,7 +338,7 @@ class DeviceManager:
         # Any new vibration command replaces the previous one's auto-stop, even
         # when this command is indefinite (duration 0) and schedules no timer.
         await self._cancel_auto_stop()
-        result: dict = {"success": True, "device": device.name, "speed": speed}
+        result: VibrateOptionalResult = {"success": True, "device": device.name, "speed": speed}
 
         if speed == 0.0:
             # Speed 0 silences the device, same as stop.
@@ -316,7 +373,7 @@ class DeviceManager:
             "Vibrating %s at %.0f%% power%s",
             device.name,
             speed * 100,
-            f", position {result['position']}" if position is not None else "",
+            f", position {position}" if position is not None else "",
         )
         try:
             for command in commands:
@@ -329,7 +386,7 @@ class DeviceManager:
             result["duration"] = duration
         return result
 
-    async def stop(self) -> dict:
+    async def stop(self) -> StopResult:
         """Stop all outputs of the active device."""
         await self.ensure_ready()
         device = self._active_device_object()
@@ -349,10 +406,10 @@ class DeviceManager:
         """Replace any pending auto-stop with one new timer (single source of truth)."""
         await self._cancel_auto_stop()
         task = asyncio.create_task(self._stop_after_delay(device, duration))
-        task.add_done_callback(lambda t: self._forget_auto_stop_task(t))
+        task.add_done_callback(self._forget_auto_stop_task)
         self._auto_stop_task = task
 
-    def _forget_auto_stop_task(self, task: asyncio.Task) -> None:
+    def _forget_auto_stop_task(self, task: asyncio.Task[None]) -> None:
         if self._auto_stop_task is task:
             self._auto_stop_task = None
 
@@ -361,7 +418,7 @@ class DeviceManager:
         self._auto_stop_task = None
         if task is None or task.done():
             return
-        task.cancel()
+        _ = task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
@@ -375,7 +432,7 @@ class DeviceManager:
 
     # ---------- status ----------
 
-    def status_snapshot(self) -> dict:
+    def status_snapshot(self) -> StatusSnapshot:
         """Truthful status regardless of Intiface state (for GET /status)."""
         active = self.get_active_device()
         if self._client is None:
@@ -384,7 +441,7 @@ class DeviceManager:
             client_state = "Connected"
         else:
             client_state = "Disconnected"
-        active_payload = None
+        active_payload: DevicePayload | None = None
         if active is not None:
             active_payload = {
                 "id": active.id,

@@ -190,7 +190,10 @@ pip install -e ".[dev]"
 pytest
 ruff check .
 ruff format --check .
+basedpyright
 ```
+
+CI runs the same test, lint, and type-check gates on Windows and Python 3.13 for every push/PR to master.
 
 To test the API manually, open `tools/test_vibrate.html` in a browser, or:
 
@@ -199,8 +202,6 @@ curl "http://localhost:3069/vibrate?speed=0.7&duration=5"
 curl -X POST http://localhost:3069/vibrate -H "Content-Type: application/json" -d "{\"speed\": 0.7, \"duration\": 5}"
 curl http://localhost:3069/status
 ```
-
-CI runs the same `ruff check .` + `pytest` on Windows and Python 3.13 for every push/PR to master.
 
 ## Troubleshooting
 

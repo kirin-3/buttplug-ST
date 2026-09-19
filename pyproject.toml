@@ -31,6 +31,7 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "ruff",
+    "basedpyright>=1.40",
 ]
 
 [project.scripts]
@@ -48,6 +49,11 @@ include = ["/buttplug_st", "/README.md", "/LICENSE"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.basedpyright]
+include = ["buttplug_st", "tests", "run.py"]
+typeCheckingMode = "recommended"
+pythonVersion = "3.13"
 
 [tool.ruff]
 line-length = 100

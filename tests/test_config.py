@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from buttplug_st.app import load_settings
-from buttplug_st.config import Settings, SettingsError
+from buttplug_st.config import ENV_FIELD_PARSERS, Settings, SettingsError
+from buttplug_st.config.config import DeviceConfig, ServerConfig, WebsocketConfig
+
+
+def test_env_parser_map_covers_every_settings_field():
+    sections = {
+        "server": ServerConfig,
+        "websocket": WebsocketConfig,
+        "device": DeviceConfig,
+    }
+    for section_name, model in sections.items():
+        assert set(ENV_FIELD_PARSERS[section_name]) == set(model.model_fields), section_name
 
 
 def test_defaults_load_with_no_input():
@@ -20,9 +33,9 @@ def test_defaults_load_with_no_input():
     assert settings.device.default_duration == 0.0
 
 
-def test_user_config_file_overrides_defaults(tmp_path):
+def test_user_config_file_overrides_defaults(tmp_path: Path):
     cfg = tmp_path / "user.toml"
-    cfg.write_text(
+    _ = cfg.write_text(
         '[server]\nport = 4000\n[websocket]\nurl = "ws://127.0.0.1:9999"\n',
         encoding="utf-8",
     )
@@ -32,17 +45,17 @@ def test_user_config_file_overrides_defaults(tmp_path):
     assert settings.server.debug is False  # untouched default survives
 
 
-def test_missing_config_file_aborts_naming_file(tmp_path):
+def test_missing_config_file_aborts_naming_file(tmp_path: Path):
     missing = tmp_path / "nonexistent.toml"
     with pytest.raises(SettingsError, match="nonexistent"):
-        Settings.load(missing)
+        _ = Settings.load(missing)
 
 
-def test_unparsable_config_file_aborts_naming_file(tmp_path):
+def test_unparsable_config_file_aborts_naming_file(tmp_path: Path):
     cfg = tmp_path / "broken.toml"
-    cfg.write_text("[server]\nport = 4000\n[unknown_section]\nx = 1\n", encoding="utf-8")
+    _ = cfg.write_text("[server]\nport = 4000\n[unknown_section]\nx = 1\n", encoding="utf-8")
     with pytest.raises(SettingsError, match="broken"):
-        Settings.load(cfg)
+        _ = Settings.load(cfg)
 
 
 def test_boolean_env_false_disables_debug(monkeypatch: pytest.MonkeyPatch):
@@ -63,7 +76,7 @@ def test_boolean_env_yes_enables_debug(monkeypatch: pytest.MonkeyPatch):
 def test_boolean_env_garbage_rejected_naming_variable(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BUTTPLUG_SERVER_DEBUG", "banana")
     with pytest.raises(SettingsError, match="BUTTPLUG_SERVER_DEBUG"):
-        Settings.load()
+        _ = Settings.load()
 
 
 def test_int_env_override(monkeypatch: pytest.MonkeyPatch):
@@ -74,7 +87,7 @@ def test_int_env_override(monkeypatch: pytest.MonkeyPatch):
 def test_int_env_garbage_rejected_naming_variable(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BUTTPLUG_SERVER_PORT", "3.5")
     with pytest.raises(SettingsError, match="BUTTPLUG_SERVER_PORT"):
-        Settings.load()
+        _ = Settings.load()
 
 
 def test_float_env_override(monkeypatch: pytest.MonkeyPatch):
@@ -85,23 +98,23 @@ def test_float_env_override(monkeypatch: pytest.MonkeyPatch):
 def test_int_env_override_rejected_outside_field_bounds(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BUTTPLUG_SERVER_PORT", "99999")
     with pytest.raises(SettingsError, match="BUTTPLUG_SERVER_PORT"):
-        Settings.load()
+        _ = Settings.load()
 
 
 def test_float_env_override_rejected_outside_field_bounds(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BUTTPLUG_DEVICE_DEFAULT_SPEED", "7.5")
     with pytest.raises(SettingsError, match="BUTTPLUG_DEVICE_DEFAULT_SPEED"):
-        Settings.load()
+        _ = Settings.load()
 
 
 def test_cli_flag_rejected_outside_field_bounds():
     with pytest.raises(SettingsError, match="server.port"):
-        load_settings(["--port", "99999"])
+        _ = load_settings(["--port", "99999"])
 
 
-def test_env_beats_config_file(monkeypatch: pytest.MonkeyPatch, tmp_path):
+def test_env_beats_config_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     cfg = tmp_path / "user.toml"
-    cfg.write_text("[server]\nport = 4000\n", encoding="utf-8")
+    _ = cfg.write_text("[server]\nport = 4000\n", encoding="utf-8")
     monkeypatch.setenv("BUTTPLUG_SERVER_PORT", "3123")
     assert Settings.load(cfg).server.port == 3123
 
@@ -112,9 +125,9 @@ def test_cli_flag_beats_env(monkeypatch: pytest.MonkeyPatch):
     assert settings.server.port == 4000
 
 
-def test_cli_beats_env_beats_file(monkeypatch: pytest.MonkeyPatch, tmp_path):
+def test_cli_beats_env_beats_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     cfg = tmp_path / "user.toml"
-    cfg.write_text('[server]\nport = 4000\nhost = "0.0.0.0"\n', encoding="utf-8")
+    _ = cfg.write_text('[server]\nport = 4000\nhost = "0.0.0.0"\n', encoding="utf-8")
     monkeypatch.setenv("BUTTPLUG_SERVER_PORT", "3123")
 
     settings = load_settings(["--config", str(cfg), "--port", "4000"])

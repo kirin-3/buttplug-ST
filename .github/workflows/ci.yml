@@ -22,5 +22,8 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
+      - name: Type check (basedpyright)
+        run: basedpyright .
+
       - name: Test (pytest)
         run: pytest -q

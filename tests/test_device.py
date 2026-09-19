@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from typing import cast
 
 import pytest
-from buttplug import ButtplugConnectorError
+from buttplug import ButtplugClient, ButtplugConnectorError
 
 from buttplug_st.config import Settings
 from buttplug_st.core.device import DeviceManager
@@ -20,8 +21,8 @@ from .fake_client import FakeButtplugClient, FakeDevice
 class FakeClock:
     """Controllable monotonic clock."""
 
-    def __init__(self, start: float = 0.0):
-        self.now = start
+    def __init__(self, start: float = 0.0) -> None:
+        self.now: float = start
 
     def __call__(self) -> float:
         return self.now
@@ -33,14 +34,14 @@ class FakeClock:
 class GatedSleep:
     """Sleep stand-in: records delays; blocks until the gate opens."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.delays: list[float] = []
-        self.gate = asyncio.Event()
+        self.gate: asyncio.Event = asyncio.Event()
         self.gate.set()
 
     async def __call__(self, delay: float) -> None:
         self.delays.append(delay)
-        await self.gate.wait()
+        _ = await self.gate.wait()
 
 
 def make_manager(
@@ -48,9 +49,15 @@ def make_manager(
     sleep: GatedSleep | None = None,
     clock: FakeClock | None = None,
 ) -> DeviceManager:
+    # The fake intentionally implements only the client surface DeviceManager
+    # uses, so the factory cast is the one sanctioned seam in these tests.
+    def factory(_name: str) -> ButtplugClient:
+        # object-first cast: the fake deliberately is not a ButtplugClient subclass
+        return cast(ButtplugClient, cast("object", client))
+
     return DeviceManager(
         Settings(),
-        client_factory=lambda name: client,
+        client_factory=factory,
         sleep_fn=sleep if sleep is not None else asyncio.sleep,
         clock_fn=clock if clock is not None else FakeClock(),
     )
@@ -71,13 +78,13 @@ async def test_start_with_intiface_down_serves_anyway():
 
 
 async def test_command_while_disconnected_raises_unavailable():
-    client = FakeButtplugClient(connect_error=ButtplugConnectorError("connection refused"))
+    client = FakeButtplugClient(connect_error=ButtplugConnectorError("refused"))
     manager = make_manager(client)
     await manager.start()
     with pytest.raises(IntifaceUnavailableError):
-        await manager.vibrate(0.7)
+        _ = await manager.vibrate(0.7)
     with pytest.raises(IntifaceUnavailableError):
-        await manager.stop()
+        _ = await manager.stop()
 
 
 async def test_reconnect_attempts_are_throttled():
@@ -109,7 +116,9 @@ async def test_devices_appear_via_events_without_scan():
 
     names = [d.name for d in manager.list_devices()]
     assert names == ["Toy A", "Toy B"]  # ordered by server index
-    assert manager.get_active_device().name == "Toy A"  # first device auto-selected
+    active = manager.get_active_device()
+    assert active is not None
+    assert active.name == "Toy A"  # first device auto-selected
 
 
 async def test_device_removal_updates_list_and_clears_selection():
@@ -124,7 +133,7 @@ async def test_device_removal_updates_list_and_clears_selection():
     assert [d.name for d in manager.list_devices()] == ["Toy B"]
     assert manager.get_active_device() is None  # active device was removed
     with pytest.raises(DeviceNotFoundError):
-        await manager.vibrate(0.5)
+        _ = await manager.vibrate(0.5)
 
 
 async def test_rescan_preserves_selection():
@@ -134,16 +143,20 @@ async def test_rescan_preserves_selection():
     for i in (1, 2, 3):
         await client.add_device(FakeDevice(i, f"Toy {i}"))
 
-    manager.set_active_device(1)
-    assert manager.get_active_device().name == "Toy 2"
+    _ = manager.set_active_device(1)
+    active = manager.get_active_device()
+    assert active is not None
+    assert active.name == "Toy 2"
 
     scan_task = asyncio.create_task(manager.scan())
-    await asyncio.sleep(0)
+    _ = await asyncio.sleep(0)
     await client.finish_scanning()
     devices = await scan_task
 
     assert [d.name for d in devices] == ["Toy 1", "Toy 2", "Toy 3"]
-    assert manager.get_active_device().name == "Toy 2"  # selection survived
+    still_active = manager.get_active_device()
+    assert still_active is not None
+    assert still_active.name == "Toy 2"  # selection survived
 
 
 async def test_listing_devices_does_not_scan():
@@ -151,7 +164,7 @@ async def test_listing_devices_does_not_scan():
     manager = make_manager(client)
     await manager.start()
     await client.add_device(FakeDevice(1, "Toy A"))
-    manager.list_devices()
+    _ = manager.list_devices()
     assert client.scanning is False
 
 
@@ -185,7 +198,7 @@ async def test_select_out_of_range_raises():
     await manager.start()
     await client.add_device(FakeDevice(1, "Toy A"))
     with pytest.raises(DeviceNotFoundError):
-        manager.set_active_device(9)
+        _ = manager.set_active_device(9)
 
 
 # ---------- vibrate ----------
@@ -236,11 +249,25 @@ async def test_vibrate_position_applied_on_supporting_device():
     await client.add_device(toy)
 
     result = await manager.vibrate(0.5, position=1.0)
-    assert result["position"] == 1.0
-    assert result["position_applied"] is True
+    assert result.get("position") == 1.0
+    assert result.get("position_applied") is True
     types = [c.output_type.value for c in toy.outputs_sent]
     assert types == ["Vibrate", "HwPositionWithDuration"]
     assert toy.outputs_sent[1].duration is not None
+
+
+async def test_vibrate_position_falls_back_to_plain_position():
+    client = FakeButtplugClient()
+    manager = make_manager(client)
+    await manager.start()
+    toy = FakeDevice(1, "Positioner", outputs=("Vibrate", "Position"))
+    await client.add_device(toy)
+
+    result = await manager.vibrate(0.5, position=1.0)
+    assert result.get("position_applied") is True
+    types = [c.output_type.value for c in toy.outputs_sent]
+    assert types == ["Vibrate", "Position"]
+    assert toy.outputs_sent[1].duration is None  # plain position has no duration
 
 
 async def test_vibrate_position_reported_not_applied_on_vibration_only_device():
@@ -252,23 +279,9 @@ async def test_vibrate_position_reported_not_applied_on_vibration_only_device():
 
     result = await manager.vibrate(0.5, position=0.8)
     assert result["device"] == "Plain Vibe"
-    assert result["position"] == 0.8
-    assert result["position_applied"] is False
+    assert result.get("position") == 0.8
+    assert result.get("position_applied") is False
     assert [c.output_type.value for c in toy.outputs_sent] == ["Vibrate"]
-
-
-async def test_vibrate_position_falls_back_to_plain_position():
-    client = FakeButtplugClient()
-    manager = make_manager(client)
-    await manager.start()
-    toy = FakeDevice(1, "Positioner", outputs=("Vibrate", "Position"))
-    await client.add_device(toy)
-
-    result = await manager.vibrate(0.5, position=1.0)
-    assert result["position_applied"] is True
-    types = [c.output_type.value for c in toy.outputs_sent]
-    assert types == ["Vibrate", "Position"]
-    assert toy.outputs_sent[1].duration is None  # plain position has no duration
 
 
 async def test_vibrate_on_non_vibrating_device_raises_not_found():
@@ -277,9 +290,9 @@ async def test_vibrate_on_non_vibrating_device_raises_not_found():
     await manager.start()
     await client.add_device(FakeDevice(1, "Rotator", outputs=("Rotate",)))
     with pytest.raises(DeviceNotFoundError):
-        await manager.vibrate(0.5)
+        _ = await manager.vibrate(0.5)
     with pytest.raises(DeviceNotFoundError):
-        await manager.vibrate(0.0)  # speed-0 path gets the same treatment
+        _ = await manager.vibrate(0.0)  # speed-0 path gets the same treatment
 
 
 async def test_actuator_count_counts_features_not_types():
@@ -298,7 +311,7 @@ async def test_vibrate_with_no_devices_raises_not_found():
     manager = make_manager(client)
     await manager.start()
     with pytest.raises(DeviceNotFoundError):
-        await manager.vibrate(0.5)
+        _ = await manager.vibrate(0.5)
 
 
 # ---------- timed auto-stop ----------
@@ -313,11 +326,12 @@ async def test_auto_stop_fires_after_duration():
     await client.add_device(toy)
 
     result = await manager.vibrate(0.8, duration=2.0)
-    assert result["duration"] == 2.0
-    assert manager._auto_stop_task is not None
-    await manager._auto_stop_task
+    assert result.get("duration") == 2.0
+    timer = manager.pending_auto_stop
+    assert timer is not None
+    await timer
     assert toy.stop_calls == 1
-    assert manager._auto_stop_task is None
+    assert manager.pending_auto_stop is None
 
 
 async def test_overlapping_vibrate_leaves_exactly_one_timer():
@@ -329,18 +343,20 @@ async def test_overlapping_vibrate_leaves_exactly_one_timer():
     toy = FakeDevice(1)
     await client.add_device(toy)
 
-    await manager.vibrate(0.8, duration=30.0)
-    stale_task = manager._auto_stop_task
-    await asyncio.sleep(0)  # let the timer start sleeping
+    _ = await manager.vibrate(0.8, duration=30.0)
+    stale_timer = manager.pending_auto_stop
+    assert stale_timer is not None
+    _ = await asyncio.sleep(0)  # let the timer start sleeping
 
-    await manager.vibrate(0.6, duration=2.0)
-    fresh_task = manager._auto_stop_task
-    assert stale_task is not fresh_task
-    assert stale_task.cancelled() or stale_task.done()
-    assert not fresh_task.done()
+    _ = await manager.vibrate(0.6, duration=2.0)
+    fresh_timer = manager.pending_auto_stop
+    assert fresh_timer is not None
+    assert stale_timer is not fresh_timer
+    assert stale_timer.cancelled() or stale_timer.done()
+    assert not fresh_timer.done()
 
     sleep.gate.set()  # the fresh timer's delay elapses
-    await fresh_task
+    await fresh_timer
     assert toy.stop_calls == 1  # silenced exactly once, by the fresh timer
 
 
@@ -353,19 +369,20 @@ async def test_indefinite_vibrate_cancels_pending_timer():
     toy = FakeDevice(1)
     await client.add_device(toy)
 
-    await manager.vibrate(0.8, duration=30.0)
-    stale_timer = manager._auto_stop_task
-    await asyncio.sleep(0)  # let the timer start sleeping
+    _ = await manager.vibrate(0.8, duration=30.0)
+    stale_timer = manager.pending_auto_stop
+    assert stale_timer is not None
+    _ = await asyncio.sleep(0)  # let the timer start sleeping
 
     # A new indefinite command must not inherit the previous auto-stop.
-    await manager.vibrate(0.6)
-    assert manager._auto_stop_task is None
+    _ = await manager.vibrate(0.6)
+    assert manager.pending_auto_stop is None
     assert stale_timer.cancelled()
     assert toy.outputs_sent[-1].value == pytest.approx(0.6)
 
     sleep.gate.set()  # the stale timer must never fire
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    _ = await asyncio.sleep(0)
+    _ = await asyncio.sleep(0)
     assert toy.stop_calls == 0
 
 
@@ -378,9 +395,10 @@ async def test_stop_cancels_pending_auto_stop():
     toy = FakeDevice(1)
     await client.add_device(toy)
 
-    await manager.vibrate(0.8, duration=30.0)
-    timer = manager._auto_stop_task
-    await asyncio.sleep(0)
+    _ = await manager.vibrate(0.8, duration=30.0)
+    timer = manager.pending_auto_stop
+    assert timer is not None
+    _ = await asyncio.sleep(0)
 
     result = await manager.stop()
     assert result["status"] == "stopped"
@@ -388,8 +406,8 @@ async def test_stop_cancels_pending_auto_stop():
     assert toy.stop_calls == 1  # only the explicit stop
 
     sleep.gate.set()  # stale timer would fire here if it survived
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    _ = await asyncio.sleep(0)
+    _ = await asyncio.sleep(0)
     assert toy.stop_calls == 1
 
 
@@ -402,11 +420,12 @@ async def test_shutdown_cancels_pending_auto_stop_and_disconnects():
     toy = FakeDevice(1)
     await client.add_device(toy)
 
-    await manager.vibrate(0.8, duration=30.0)
-    timer = manager._auto_stop_task
+    _ = await manager.vibrate(0.8, duration=30.0)
+    timer = manager.pending_auto_stop
+    assert timer is not None
     await manager.shutdown()
     assert timer.cancelled()
-    assert manager._auto_stop_task is None
+    assert manager.pending_auto_stop is None
     assert client.disconnect_calls == 1
     assert manager.list_devices() == []
     assert manager.is_connected is False
@@ -421,7 +440,7 @@ async def test_scan_returns_devices_and_stops_scanning():
     await manager.start()
 
     async def discover_later():
-        await asyncio.sleep(0)
+        _ = await asyncio.sleep(0)
         await client.add_device(FakeDevice(1, "Toy A"))
 
     discover = asyncio.create_task(discover_later())
@@ -439,4 +458,4 @@ async def test_scan_requires_connection():
     manager = make_manager(client)
     await manager.start()
     with pytest.raises(IntifaceUnavailableError):
-        await manager.scan()
+        _ = await manager.scan()

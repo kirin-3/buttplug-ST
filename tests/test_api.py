@@ -3,8 +3,11 @@ parity, validation errors, and status-code mapping."""
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
-from buttplug import ButtplugConnectorError
+from buttplug import ButtplugClient, ButtplugConnectorError
+from quart import Quart, Response
 
 from buttplug_st.app import create_app
 from buttplug_st.config import Settings
@@ -13,14 +16,31 @@ from buttplug_st.core.device import DeviceManager
 from .fake_client import FakeButtplugClient, FakeDevice
 
 
-def make_app(client: FakeButtplugClient):
-    manager = DeviceManager(Settings(), client_factory=lambda name: client)
+def make_app(client: FakeButtplugClient) -> tuple[Quart, DeviceManager]:
+    # The fake intentionally implements only the client surface DeviceManager
+    # uses, so the factory cast is the one sanctioned seam in these tests.
+    def factory(_name: str) -> ButtplugClient:
+        return cast(ButtplugClient, cast("object", client))
+
+    manager = DeviceManager(Settings(), client_factory=factory)
     app = create_app(Settings(), device_manager=manager)
     return app, manager
 
 
-async def get_json(response):
-    return await response.get_json()
+async def get_json(response: Response) -> dict[str, object]:
+    payload = cast("object", await response.get_json())
+    assert isinstance(payload, dict)
+    return cast("dict[str, object]", payload)
+
+
+def as_dict(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return cast("dict[str, object]", value)
+
+
+def as_list(value: object) -> list[object]:
+    assert isinstance(value, list)
+    return cast("list[object]", value)
 
 
 # ---------- status ----------
@@ -35,10 +55,11 @@ async def test_status_truthful_while_intiface_down():
         assert response.status_code == 200
         body = await get_json(response)
         assert body["success"] is True
-        assert body["data"]["intiface_connected"] is False
-        assert body["data"]["has_devices"] is False
-        assert body["data"]["active_device"] is None
-        assert body["data"]["websocket_url"] == "ws://127.0.0.1:12345"
+        data = as_dict(body["data"])
+        assert data["intiface_connected"] is False
+        assert data["has_devices"] is False
+        assert data["active_device"] is None
+        assert data["websocket_url"] == "ws://127.0.0.1:12345"
 
 
 async def test_status_connected_with_active_device():
@@ -49,8 +70,10 @@ async def test_status_connected_with_active_device():
         await client.add_device(FakeDevice(1, "Toy A"))
         response = await test_client.get("/status")
         body = await get_json(response)
-        assert body["data"]["intiface_connected"] is True
-        assert body["data"]["active_device"]["name"] == "Toy A"
+        data = as_dict(body["data"])
+        assert data["intiface_connected"] is True
+        active = as_dict(data["active_device"])
+        assert active["name"] == "Toy A"
 
 
 # ---------- legacy GET compatibility ----------
@@ -86,8 +109,9 @@ async def test_get_vibrate_defaults():
         await client.add_device(FakeDevice(1, "Toy A"))
         response = await test_client.get("/vibrate")
         body = await get_json(response)
-        assert body["data"]["speed"] == 0.5
-        assert "duration" not in body["data"]
+        data = as_dict(body["data"])
+        assert data["speed"] == 0.5
+        assert "duration" not in data
 
 
 async def test_get_devices_is_read_only():
@@ -100,7 +124,8 @@ async def test_get_devices_is_read_only():
         response = await test_client.get("/devices")
         assert response.status_code == 200
         body = await get_json(response)
-        assert body["data"]["devices"] == [
+        data = as_dict(body["data"])
+        assert data["devices"] == [
             {
                 "id": "1",
                 "name": "Toy A",
@@ -109,7 +134,7 @@ async def test_get_devices_is_read_only():
                 "actuator_types": ["Vibrate"],
             }
         ]
-        assert body["data"]["active_index"] == 0
+        assert data["active_index"] == 0
         assert client.scanning is False
         assert manager.has_devices is True
 
@@ -123,7 +148,8 @@ async def test_get_devices_active_index_negative_when_none():
         await client.remove_device(1)
         response = await test_client.get("/devices")
         body = await get_json(response)
-        assert body["data"]["active_index"] == -1
+        data = as_dict(body["data"])
+        assert data["active_index"] == -1
 
 
 # ---------- POST endpoints ----------
@@ -142,9 +168,10 @@ async def test_post_vibrate_parity():
         body = await get_json(response)
         assert body["success"] is True
         assert body["message"] == "Vibrating at 70% power for 5.0 seconds"
-        assert body["data"]["device"] == "Toy A"
-        assert body["data"]["speed"] == 0.7
-        assert body["data"]["duration"] == 5.0
+        data = as_dict(body["data"])
+        assert data["device"] == "Toy A"
+        assert data["speed"] == 0.7
+        assert data["duration"] == 5.0
 
 
 async def test_post_stop_and_get_stop():
@@ -182,7 +209,8 @@ async def test_post_device_selection():
         assert response.status_code == 200
         body = await get_json(response)
         assert body["message"] == "Selected device: Toy B"
-        assert body["data"]["name"] == "Toy B"
+        data = as_dict(body["data"])
+        assert data["name"] == "Toy B"
 
         response = await test_client.post("/device", json={"index": 9})
         assert response.status_code == 404
@@ -204,7 +232,7 @@ async def test_non_numeric_speed_maps_to_400():
         body = await get_json(response)
         assert body["error"] == "validation_error"
         assert body["status_code"] == 400
-        assert "speed" in body["detail"]
+        assert "speed" in str(body["detail"])
 
 
 async def test_out_of_range_speed_maps_to_400():
@@ -216,7 +244,7 @@ async def test_out_of_range_speed_maps_to_400():
         response = await test_client.get("/vibrate?speed=1.5")
         assert response.status_code == 400
         body = await get_json(response)
-        assert "speed" in body["detail"]
+        assert "speed" in str(body["detail"])
 
 
 async def test_post_vibrate_out_of_range_speed_maps_to_400():
@@ -228,7 +256,7 @@ async def test_post_vibrate_out_of_range_speed_maps_to_400():
         response = await test_client.post("/vibrate", json={"speed": 42})
         assert response.status_code == 400
         body = await get_json(response)
-        assert "speed" in body["detail"]
+        assert "speed" in str(body["detail"])
 
 
 async def test_get_vibrate_position_parity():
@@ -243,8 +271,9 @@ async def test_get_vibrate_position_parity():
         assert response.status_code == 200
         body = await get_json(response)
         assert body["message"] == "Vibrating at 50% power, position 100%"
-        assert body["data"]["position"] == 1.0
-        assert body["data"]["position_applied"] is True
+        data = as_dict(body["data"])
+        assert data["position"] == 1.0
+        assert data["position_applied"] is True
 
 
 async def test_vibrate_on_non_vibrating_device_maps_to_404():
@@ -277,7 +306,8 @@ async def test_post_vibrate_malformed_body_maps_to_400_not_defaults():
         response = await test_client.post("/vibrate")
         assert response.status_code == 200
         body = await get_json(response)
-        assert body["data"]["speed"] == 0.5
+        data = as_dict(body["data"])
+        assert data["speed"] == 0.5
 
         # A non-object JSON body is also a 400.
         response = await test_client.post("/vibrate", json=[0.7])
@@ -327,7 +357,7 @@ async def test_unknown_route_returns_json_envelope():
 
 async def test_scan_endpoint_returns_devices():
     client = FakeButtplugClient()
-    app, manager = make_app(client)
+    app, _ = make_app(client)
     async with app.test_app() as test_app:
         test_client = test_app.test_client()
 
@@ -343,5 +373,8 @@ async def test_scan_endpoint_returns_devices():
         await discover_task
         assert response.status_code == 200
         body = await get_json(response)
-        assert body["data"]["count"] == 1
-        assert body["data"]["devices"][0]["name"] == "Toy A"
+        data = as_dict(body["data"])
+        assert data["count"] == 1
+        devices = as_list(data["devices"])
+        first = as_dict(devices[0])
+        assert first["name"] == "Toy A"

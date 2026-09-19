@@ -1,7 +1,7 @@
 """Request/response schemas (Pydantic v2). GET query strings and POST JSON bodies
 funnel through the same models, so validation and error text are identical."""
 
-from typing import Any
+from __future__ import annotations
 
 from pydantic import BaseModel, Field
 from pydantic import ValidationError as PydanticValidationError
@@ -47,7 +47,7 @@ class APIResponse(BaseModel):
     message: str = Field(
         description="Human-readable message describing the result",
     )
-    data: dict[str, Any] | None = Field(
+    data: dict[str, object] | None = Field(
         default=None,
         description="Optional data payload",
     )
@@ -87,7 +87,7 @@ class ErrorResponse(BaseModel):
 def format_validation_error(exc: PydanticValidationError) -> str:
     """Render a Pydantic error as '<parameter>: <message>' entries, naming the
     offending parameter for the API error detail."""
-    parts = []
+    parts: list[str] = []
     for error in exc.errors():
         location = ".".join(str(part) for part in error["loc"]) or "body"
         parts.append(f"{location}: {error['msg']}")

@@ -7,10 +7,13 @@ import asyncio
 import contextlib
 import logging
 import sys
+from typing import cast
 
 from pydantic import ValidationError as PydanticValidationError
 from quart import Quart, Response, jsonify
-from quart_cors import cors
+
+# quart-cors ships incomplete type information; its return type is opaque.
+from quart_cors import cors  # pyright: ignore[reportUnknownVariableType]
 from werkzeug.exceptions import HTTPException
 
 from . import __version__
@@ -86,7 +89,6 @@ def create_app(settings: Settings, device_manager: DeviceManager | None = None) 
     async def shutdown() -> None:
         await device_mgr.shutdown()
 
-    app.device_manager = device_mgr
     return app
 
 
@@ -107,16 +109,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "REST bridge between SillyTavern and buttplug.io devices via Intiface Central."
         ),
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--config",
         metavar="PATH",
         help="TOML config file (default: packaged default.toml)",
     )
-    parser.add_argument("--host", help="HTTP host to bind (overrides config file and environment)")
-    parser.add_argument(
+    _ = parser.add_argument(
+        "--host", help="HTTP host to bind (overrides config file and environment)"
+    )
+    _ = parser.add_argument(
         "--port", type=int, help="HTTP port to bind (overrides config file and environment)"
     )
-    parser.add_argument("--debug", action="store_true", help="Enable Quart debug mode")
+    _ = parser.add_argument("--debug", action="store_true", help="Enable Quart debug mode")
     return parser
 
 
@@ -127,13 +131,19 @@ def load_settings(argv: list[str] | None = None) -> Settings:
     packaged defaults.
     """
     args = build_arg_parser().parse_args(argv)
-    settings = Settings.load(args.config)
+    # argparse.Namespace attributes are untyped; pin them once, here.
+    config_path = cast("str | None", getattr(args, "config", None))
+    host = cast("str | None", getattr(args, "host", None))
+    port = cast("int | None", getattr(args, "port", None))
+    debug = cast("bool", getattr(args, "debug", False))
+
+    settings = Settings.load(config_path)
     overrides: dict[str, dict[str, object]] = {"server": {}}
-    if args.host is not None:
-        overrides["server"]["host"] = args.host
-    if args.port is not None:
-        overrides["server"]["port"] = args.port
-    if args.debug:
+    if host is not None:
+        overrides["server"]["host"] = host
+    if port is not None:
+        overrides["server"]["port"] = port
+    if debug:
         overrides["server"]["debug"] = True
     settings.apply_updates(overrides)
     return settings
@@ -151,19 +161,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    server_line = " ".join(
+        [
+            "server:    ",
+            f"host={settings.server.host}",
+            f"port={settings.server.port}",
+            f"debug={settings.server.debug}",
+        ]
+    )
+    websocket_line = " ".join(
+        [
+            "websocket: ",
+            f"url={settings.websocket.url}",
+            f"scan_timeout={settings.websocket.scan_timeout}",
+        ]
+    )
+    device_line = " ".join(
+        [
+            "device:    ",
+            f"default_speed={settings.device.default_speed}",
+            f"default_position={settings.device.default_position}",
+            f"default_duration={settings.device.default_duration}",
+        ]
+    )
     print(f"ButtplugST {__version__}")
-    print(
-        f"  server:    host={settings.server.host} port={settings.server.port} "
-        f"debug={settings.server.debug}"
-    )
-    print(
-        f"  websocket: url={settings.websocket.url} scan_timeout={settings.websocket.scan_timeout}"
-    )
-    print(
-        f"  device:    default_speed={settings.device.default_speed} "
-        f"default_position={settings.device.default_position} "
-        f"default_duration={settings.device.default_duration}"
-    )
+    print(server_line)
+    print(websocket_line)
+    print(device_line)
 
     # KeyboardInterrupt covers Ctrl+C on every platform; no loop-level
     # signal handlers are registered (they are unsupported on Windows).
