@@ -22,8 +22,6 @@ This bridge allows you to control devices via [Intiface Central](https://github.
 
 *In theory it should work with any buttplug.io supported device.*
 
-### A more user friendly installation guide can be found [here on my blog](https://kirin.pw/posts/sillytavern-buttplug/).
-
 ## Installation
 
 Requires Python (3.x recommended) and pip.

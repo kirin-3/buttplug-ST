@@ -39,6 +39,9 @@ virtualenv/
 .pydevproject
 .settings/
 .cursor/
+.zcode/
+.zcodeignore
+openspec/
 
 # Log files
 *.log
