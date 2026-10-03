@@ -1,3 +1,3 @@
-from .device import DeviceManager, DeviceInfo
+from .device import DeviceInfo, DeviceManager
 
-__all__ = ["DeviceManager", "DeviceInfo"] 
+__all__ = ["DeviceManager", "DeviceInfo"]

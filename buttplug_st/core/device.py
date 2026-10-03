@@ -1,280 +1,463 @@
+"""Device management on the official buttplug 1.0.0 client.
+
+The device list is maintained by client events (device added/removed/server
+disconnect); listing devices never triggers a scan and never resets the active
+selection, which is tracked by the server-assigned device index (stable device
+identity) rather than list position.
+"""
+
+from __future__ import annotations
+
 import asyncio
+import contextlib
 import logging
 import time
-from typing import Optional, List, Dict, Any
-from dataclasses import dataclass
-from buttplug.client import (
-    Client as ButtplugClient,
-    Device as ButtplugClientDevice
-)
-from buttplug import ConnectorError
-from buttplug.connectors import WebsocketConnector
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import TypedDict
 
 from ..config import Settings
-from .exceptions import (
-    DeviceNotFoundError,
-    DeviceConnectionError,
-    IntifaceConnectionError,
-    CommandError
+from .buttplug_adapter import (
+    ButtplugClient,
+    ButtplugConnectorError,
+    ButtplugDevice,
+    ButtplugError,
+    DeviceOutputCommand,
+    OutputType,
 )
+from .exceptions import CommandError, DeviceNotFoundError, IntifaceUnavailableError
 
 logger = logging.getLogger(__name__)
 
-@dataclass
-class DeviceInfo:
-    """Information about a connected device"""
+#: How long a POSITION_WITH_DURATION move takes to reach the target position.
+POSITION_MOVE_MS = 500
+
+SleepFn = Callable[[float], Awaitable[None]]
+ClockFn = Callable[[], float]
+
+
+class DevicePayload(TypedDict):
+    """Device summary as it appears in API responses."""
+
     id: str
     name: str
     index: int
     actuator_count: int
-    actuator_types: List[str]
+    actuator_types: list[str]
+
+
+class VibrateResult(TypedDict):
+    """Payload of a successful vibration command (always-present keys)."""
+
+    success: bool
+    device: str
+    speed: float
+
+
+class VibrateOptionalResult(VibrateResult, total=False):
+    """Keys that only appear on the vibration payload when applicable."""
+
+    position: float
+    position_applied: bool
+    duration: float
+
+
+class StopResult(TypedDict):
+    """Payload of a successful stop command."""
+
+    success: bool
+    device: str
+    status: str
+
+
+class StatusSnapshot(TypedDict):
+    """Truthful server/device status, any Intiface state."""
+
+    status: str
+    server_running: bool
+    server_initialized: bool
+    intiface_connected: bool
+    client_state: str
+    device_count: int
+    has_devices: bool
+    websocket_url: str
+    active_device: DevicePayload | None
+
+
+@dataclass(frozen=True)
+class DeviceInfo:
+    """Public snapshot of a tracked device."""
+
+    id: str
+    name: str
+    index: int
+    actuator_count: int
+    actuator_types: list[str] = field(default_factory=list)
+    server_index: int = -1  # buttplug server-assigned identity (not part of the API shape)
+    supports_position: bool = False
+
 
 class DeviceManager:
-    """Manages connections to buttplug devices"""
-    
-    def __init__(self, settings: Settings):
-        self.settings = settings
-        self._client: Optional[ButtplugClient] = None
-        self._devices: List[ButtplugClientDevice] = []
-        self._active_device_index: int = 0
-        self._initialized: bool = False
-        self._last_connection_attempt: float = 0
-        self._connection_retry_delay: float = 5.0  # seconds
-    
-    @property
-    def active_device(self) -> Optional[ButtplugClientDevice]:
-        """Get the currently active device"""
-        if not self._devices:
-            return None
-        return self._devices[self._active_device_index]
-    
+    """Owns the Intiface connection, device tracking, and device commands."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        client_factory: Callable[[str], ButtplugClient] | None = None,
+        sleep_fn: SleepFn = asyncio.sleep,
+        clock_fn: ClockFn = time.monotonic,
+    ) -> None:
+        self.settings: Settings = settings
+        self._client_factory: Callable[[str], ButtplugClient] = (
+            client_factory if client_factory is not None else ButtplugClient
+        )
+        self._sleep: SleepFn = sleep_fn
+        self._clock: ClockFn = clock_fn
+        self._client: ButtplugClient | None = None
+        self._devices: list[ButtplugDevice] = []  # kept ordered by server index
+        self._active_server_index: int | None = None
+        self._auto_stop_task: asyncio.Task[None] | None = None
+        self._scan_finished: asyncio.Event | None = None
+        self._last_connection_attempt: float | None = None  # None = never attempted
+        self._reconnect_min_interval: float = 5.0
+
+    # ---------- state properties ----------
+
     @property
     def is_connected(self) -> bool:
-        """Check if the client is connected to the server"""
         return self._client is not None and self._client.connected
-    
+
     @property
     def has_devices(self) -> bool:
-        """Check if any devices are connected"""
         return len(self._devices) > 0
-    
-    async def initialize(self) -> None:
-        """Initialize the Buttplug client and scan for devices"""
-        logger.info("Initialize called")
-        
-        # If already initialized and connected, just return
-        if self._initialized and self.is_connected:
-            logger.info("Already initialized and connected")
-            return
-        
-        # If we recently failed to connect, don't retry too quickly
-        current_time = time.time()
-        if (self._last_connection_attempt > 0 and 
-            current_time - self._last_connection_attempt < self._connection_retry_delay):
-            logger.info(f"Connection attempt too recent, waiting {self._connection_retry_delay} seconds")
-            raise IntifaceConnectionError("Connection attempt too recent, please wait a moment")
-        
-        self._last_connection_attempt = current_time
-        
-        # If we have a client but it's disconnected, clean it up
-        if self._client and not self._client.connected:
-            logger.info("Client exists but disconnected, cleaning up")
-            self._client = None
-            self._devices = []
-            self._initialized = False
-        
+
+    @property
+    def pending_auto_stop(self) -> asyncio.Task[None] | None:
+        """The auto-stop timer task if one is pending (introspection/tests)."""
+        return self._auto_stop_task
+
+    # ---------- lifecycle ----------
+
+    async def start(self) -> None:
+        """Attempt the initial connection. Non-fatal: the server must serve
+        HTTP even when Intiface Central is down."""
         try:
-            logger.info("Creating new client")
-            self._client = ButtplugClient("ButtplugST")
-            connector = WebsocketConnector(self.settings.websocket.url)
-            
-            logger.info(f"Connecting to {self.settings.websocket.url}")
-            await self._client.connect(connector)
-            logger.info(f"Connected to Intiface at {self.settings.websocket.url}")
-            
-            # Scan for devices
-            await self.scan_devices()
-            self._initialized = True
-            
-        except ConnectorError as e:
-            logger.error(f"Failed to connect to Intiface: {e}")
-            raise IntifaceConnectionError(f"Failed to connect to Intiface: {str(e)}")
-        except Exception as e:
-            logger.error(f"Initialization error: {e}")
-            raise DeviceConnectionError(f"Initialization error: {str(e)}")
-    
-    async def scan_devices(self) -> List[DeviceInfo]:
-        """Scan for devices and update the device list"""
-        logger.info("Scan devices called")
-        
-        if not self._client:
-            logger.error("Client is None, cannot scan")
-            raise IntifaceConnectionError("Client not initialized")
-            
-        if not self._client.connected:
-            logger.error("Client not connected, cannot scan")
-            raise IntifaceConnectionError("Not connected to Intiface")
-            
-        try:
-            logger.info("Scanning for devices...")
-            await self._client.start_scanning()
-            await asyncio.sleep(self.settings.websocket.scan_timeout)
-            await self._client.stop_scanning()
-            
-            self._devices = self._client.devices
-            logger.info(f"Found {len(self._devices)} devices")
-            
-            if not self._devices:
-                return []
-                
-            # Reset active device index
-            self._active_device_index = 0
-            
-            # Return device info
-            return [self._get_device_info(i) for i in range(len(self._devices))]
-            
-        except Exception as e:
-            logger.error(f"Error scanning for devices: {e}")
-            raise DeviceConnectionError(f"Error scanning for devices: {str(e)}")
-    
-    def _get_device_info(self, index: int) -> DeviceInfo:
-        """Get information about a device at the specified index"""
-        if index < 0 or index >= len(self._devices):
-            raise DeviceNotFoundError(f"Device index {index} out of range")
-            
-        device = self._devices[index]
-        actuator_types = []
-        
-        for actuator in device.actuators:
-            actuator_types.append(str(type(actuator).__name__))
-        
-        return DeviceInfo(
-            id=device.index,
-            name=device.name,
-            index=index,
-            actuator_count=len(device.actuators),
-            actuator_types=actuator_types
-        )
-    
-    def get_all_devices(self) -> List[DeviceInfo]:
-        """Get information about all connected devices"""
-        return [self._get_device_info(i) for i in range(len(self._devices))]
-    
-    def get_active_device(self) -> Optional[DeviceInfo]:
-        """Get information about the currently active device"""
-        if not self._devices:
-            return None
-        return self._get_device_info(self._active_device_index)
-    
-    def set_active_device(self, index: int) -> DeviceInfo:
-        """Set the active device by index"""
-        if index < 0 or index >= len(self._devices):
-            raise DeviceNotFoundError(f"Device index {index} out of range")
-            
-        self._active_device_index = index
-        return self._get_device_info(index)
-    
-    async def vibrate(self, speed: float, position: Optional[float] = None, 
-                      duration: float = 0) -> Dict[str, Any]:
-        """Control vibration of the active device"""
-        device = self.active_device
-        if not device or not device.actuators:
-            raise DeviceNotFoundError()
-        
-        try:
-            # Clamp values
-            speed = max(0.0, min(1.0, speed))
-            if position is not None:
-                position = max(0.0, min(1.0, position))
-            
-            logger.info(f"Vibrating device {device.name} at {speed*100:.0f}% power")
-            
-            # Get the first actuator (usually the vibration motor)
-            actuator = device.actuators[0]
-            
-            # Try sending both speed and position if supported
-            try:
-                if position is not None:
-                    await actuator.command(speed, position)
-                else:
-                    await actuator.command(speed)
-            except TypeError:
-                # Fallback: send only speed if position is not supported
-                await actuator.command(speed)
-                
-            # If duration specified, schedule stop
-            if duration > 0:
-                asyncio.create_task(self._stop_after_delay(actuator, duration))
-                
-            result = {
-                "success": True,
-                "device": device.name,
-                "speed": speed,
-            }
-            
-            if position is not None:
-                result["position"] = position
-                
-            if duration > 0:
-                result["duration"] = duration
-                
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error sending vibrate command: {e}")
-            raise CommandError(f"Error sending vibrate command: {str(e)}")
-    
-    async def _stop_after_delay(self, actuator, duration: float) -> None:
-        """Stop actuator after specified duration"""
-        await asyncio.sleep(duration)
-        try:
-            await actuator.command(0)
-            logger.info(f"Stopped vibration after {duration} seconds")
-        except Exception as e:
-            logger.error(f"Error stopping vibration: {e}")
-    
-    async def stop(self) -> Dict[str, Any]:
-        """Stop all actuators on the active device"""
-        device = self.active_device
-        if not device:
-            raise DeviceNotFoundError()
-            
-        try:
-            await device.stop()
-            return {
-                "success": True,
-                "device": device.name,
-                "status": "stopped"
-            }
-        except Exception as e:
-            logger.error(f"Error stopping device: {e}")
-            raise CommandError(f"Error stopping device: {str(e)}")
-    
+            await self._connect()
+        except IntifaceUnavailableError as exc:
+            logger.warning("Intiface Central not reachable at startup: %s", exc)
+
     async def shutdown(self) -> None:
-        """Disconnect from all devices and shutdown client"""
-        logger.info("Shutdown called")
-        
-        # First stop all devices if possible
-        if self._client and self._client.connected and self._devices:
+        """Cancel the pending auto-stop and disconnect cleanly."""
+        await self._cancel_auto_stop()
+        if self._client is not None:
             try:
-                logger.info("Stopping all devices before shutdown")
-                for device in self._devices:
-                    try:
-                        await device.stop()
-                    except Exception as e:
-                        logger.warning(f"Failed to stop device {device.name}: {e}")
-            except Exception as e:
-                logger.warning(f"Error stopping devices during shutdown: {e}")
-        
-        # Then disconnect
-        if self._client and self._client.connected:
-            try:
-                await self._client.disconnect()
-                logger.info("Disconnected from Intiface")
-            except Exception as e:
-                logger.error(f"Error during client disconnect: {e}")
-        
+                await self._client.disconnect()  # stops all devices first
+            except ButtplugError as exc:
+                logger.warning("Error during client disconnect: %s", exc.message)
+            self._client = None
+        self._devices = []
+        self._active_server_index = None
+        logger.debug("Device manager shut down")
+
+    async def ensure_ready(self) -> None:
+        """Ensure a connected client, attempting one throttled reconnect.
+
+        Raises IntifaceUnavailableError when Intiface is down or the retry
+        interval has not elapsed since the last attempt.
+        """
+        if self.is_connected:
+            return
+        await self._connect()
+
+    async def _connect(self) -> None:
+        if self._last_connection_attempt is not None:
+            elapsed = self._clock() - self._last_connection_attempt
+            if elapsed < self._reconnect_min_interval:
+                retry_in = self._reconnect_min_interval - elapsed
+                raise IntifaceUnavailableError(
+                    f"Intiface Central is not available (retry allowed in {retry_in:.1f}s)"
+                )
+        self._last_connection_attempt = self._clock()
+
+        client = self._client_factory("ButtplugST")
+        client.on_device_added = self._on_device_added
+        client.on_device_removed = self._on_device_removed
+        client.on_scanning_finished = self._on_scanning_finished
+        client.on_server_disconnect = self._on_server_disconnect
+        client.on_error = self._on_error
+        try:
+            # Already-paired devices fire on_device_added during connect().
+            await client.connect(self.settings.websocket.url)
+        except ButtplugConnectorError as exc:
+            logger.info(
+                "Could not connect to Intiface at %s: %s",
+                self.settings.websocket.url,
+                exc.message,
+            )
+            raise IntifaceUnavailableError(
+                f"Could not connect to Intiface at {self.settings.websocket.url}"
+            ) from exc
+        except ButtplugError as exc:
+            raise IntifaceUnavailableError(f"Intiface handshake failed: {exc.message}") from exc
+        self._client = client
+        # A successful connect proves Intiface is up again: clear the throttle.
+        self._last_connection_attempt = None
+        logger.info("Connected to Intiface at %s", self.settings.websocket.url)
+
+    # ---------- client events ----------
+
+    async def _on_device_added(self, device: ButtplugDevice) -> None:
+        logger.debug("Device added: %s (server index %s)", device.name, device.index)
+        # De-duplicate by server index: a device may be re-announced (e.g. on reconnect).
+        self._devices = sorted(
+            [d for d in self._devices if d.index != device.index] + [device],
+            key=lambda d: d.index,
+        )
+        if self._active_server_index is None:
+            self._active_server_index = device.index
+
+    async def _on_device_removed(self, device: ButtplugDevice) -> None:
+        logger.debug("Device removed: %s (server index %s)", device.name, device.index)
+        self._devices = [d for d in self._devices if d.index != device.index]
+        if self._active_server_index == device.index:
+            self._active_server_index = None
+            await self._cancel_auto_stop()
+
+    async def _on_scanning_finished(self) -> None:
+        logger.debug("Scanning finished")
+        if self._scan_finished is not None:
+            self._scan_finished.set()
+
+    async def _on_server_disconnect(self) -> None:
+        logger.warning("Intiface server disconnected")
+        # The client clears its own device dict without per-device removal
+        # callbacks, so the tracked list and selection must be cleared here.
         self._client = None
         self._devices = []
-        self._initialized = False
-        logger.info("Shutdown complete") 
+        self._active_server_index = None
+        await self._cancel_auto_stop()
+
+    async def _on_error(self, exc: Exception) -> None:
+        logger.debug("Intiface server error: %s", exc)
+
+    # ---------- devices ----------
+
+    def list_devices(self) -> list[DeviceInfo]:
+        return [self._device_info(d, i) for i, d in enumerate(self._devices)]
+
+    def get_active_device(self) -> DeviceInfo | None:
+        active = self._active_device_object()
+        if active is None:
+            return None
+        return self._device_info(active, self._devices.index(active))
+
+    def set_active_device(self, index: int) -> DeviceInfo:
+        """Select the active device by list index."""
+        if index < 0 or index >= len(self._devices):
+            raise DeviceNotFoundError(f"Device index {index} out of range")
+        device = self._devices[index]
+        self._active_server_index = device.index
+        logger.debug("Active device set to %s (server index %s)", device.name, device.index)
+        return self._device_info(device, index)
+
+    def _active_device_object(self) -> ButtplugDevice | None:
+        for device in self._devices:
+            if device.index == self._active_server_index:
+                return device
+        return None
+
+    def _device_info(self, device: ButtplugDevice, index: int) -> DeviceInfo:
+        output_feature_count = 0
+        output_types: set[str] = set()
+        for feature in device.features.values():
+            outputs = feature.outputs
+            if outputs is None:
+                continue
+            output_feature_count += 1
+            output_types.update(outputs.keys())
+        return DeviceInfo(
+            id=str(device.index),
+            name=device.name,
+            index=index,
+            # Legacy servers counted actuator features (a dual-motor vibrator -> 2).
+            actuator_count=output_feature_count,
+            actuator_types=sorted(output_types),
+            server_index=device.index,
+            supports_position=device.has_output(OutputType.POSITION_WITH_DURATION)
+            or device.has_output(OutputType.POSITION),
+        )
+
+    # ---------- scan ----------
+
+    async def scan(self) -> list[DeviceInfo]:
+        """Explicitly scan for devices, bounded by the configured timeout.
+
+        The selection is untouched: if the active device is still present it
+        stays active; if it vanished, its removal event already cleared it.
+        """
+        await self.ensure_ready()
+        finished = asyncio.Event()
+        self._scan_finished = finished
+        client = self._client
+        assert client is not None
+        try:
+            _ = await client.start_scanning()
+            # Bounded scan: on timeout report whatever arrived.
+            with contextlib.suppress(TimeoutError):
+                _ = await asyncio.wait_for(
+                    finished.wait(), timeout=self.settings.websocket.scan_timeout
+                )
+        except ButtplugError as exc:
+            raise IntifaceUnavailableError(f"Scan failed: {exc.message}") from exc
+        finally:
+            self._scan_finished = None
+            if client.scanning:
+                with contextlib.suppress(ButtplugError):
+                    await client.stop_scanning()
+        return self.list_devices()
+
+    # ---------- commands ----------
+
+    async def vibrate(
+        self, speed: float, position: float | None = None, duration: float = 0.0
+    ) -> VibrateOptionalResult:
+        """Vibrate all vibration outputs of the active device.
+
+        Position is applied only where the device supports it; the response
+        reports whether it was applied.
+        """
+        await self.ensure_ready()
+        device = self._active_device_object()
+        if device is None:
+            raise DeviceNotFoundError()
+        if not device.has_output(OutputType.VIBRATE):
+            # Legacy servers answered 404 when the active device could not vibrate.
+            raise DeviceNotFoundError(f"{device.name} has no vibration outputs")
+
+        speed = min(1.0, max(0.0, speed))
+        # Any new vibration command replaces the previous one's auto-stop, even
+        # when this command is indefinite (duration 0) and schedules no timer.
+        await self._cancel_auto_stop()
+        result: VibrateOptionalResult = {"success": True, "device": device.name, "speed": speed}
+
+        if speed == 0.0:
+            # Speed 0 silences the device, same as stop.
+            try:
+                await device.run_output(DeviceOutputCommand(OutputType.VIBRATE, 0.0))
+            except ButtplugError as exc:
+                raise CommandError(f"Error sending vibrate command: {exc.message}") from exc
+            if duration > 0:
+                result["duration"] = duration
+            return result
+
+        commands = [DeviceOutputCommand(OutputType.VIBRATE, speed)]
+        if position is not None:
+            position = min(1.0, max(0.0, position))
+            result["position"] = position
+            if device.has_output(OutputType.POSITION_WITH_DURATION):
+                commands.append(
+                    DeviceOutputCommand(
+                        OutputType.POSITION_WITH_DURATION,
+                        position,
+                        duration=POSITION_MOVE_MS,
+                    )
+                )
+                result["position_applied"] = True
+            elif device.has_output(OutputType.POSITION):
+                commands.append(DeviceOutputCommand(OutputType.POSITION, position))
+                result["position_applied"] = True
+            else:
+                result["position_applied"] = False
+
+        logger.debug(
+            "Vibrating %s at %.0f%% power%s",
+            device.name,
+            speed * 100,
+            f", position {position}" if position is not None else "",
+        )
+        try:
+            for command in commands:
+                await device.run_output(command)
+        except ButtplugError as exc:
+            raise CommandError(f"Error sending vibrate command: {exc.message}") from exc
+
+        if duration > 0:
+            await self._schedule_auto_stop(device, duration)
+            result["duration"] = duration
+        return result
+
+    async def stop(self) -> StopResult:
+        """Stop all outputs of the active device."""
+        await self.ensure_ready()
+        device = self._active_device_object()
+        if device is None:
+            raise DeviceNotFoundError()
+        await self._cancel_auto_stop()
+        logger.debug("Stopping %s", device.name)
+        try:
+            await device.stop()
+        except ButtplugError as exc:
+            raise CommandError(f"Error stopping device: {exc.message}") from exc
+        return {"success": True, "device": device.name, "status": "stopped"}
+
+    # ---------- timed auto-stop ----------
+
+    async def _schedule_auto_stop(self, device: ButtplugDevice, duration: float) -> None:
+        """Replace any pending auto-stop with one new timer (single source of truth)."""
+        await self._cancel_auto_stop()
+        task = asyncio.create_task(self._stop_after_delay(device, duration))
+        task.add_done_callback(self._forget_auto_stop_task)
+        self._auto_stop_task = task
+
+    def _forget_auto_stop_task(self, task: asyncio.Task[None]) -> None:
+        if self._auto_stop_task is task:
+            self._auto_stop_task = None
+
+    async def _cancel_auto_stop(self) -> None:
+        task = self._auto_stop_task
+        self._auto_stop_task = None
+        if task is None or task.done():
+            return
+        _ = task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def _stop_after_delay(self, device: ButtplugDevice, duration: float) -> None:
+        await self._sleep(duration)
+        logger.debug("Auto-stop firing for %s after %.1fs", device.name, duration)
+        try:
+            await device.stop()
+        except ButtplugError as exc:
+            logger.warning("Auto-stop failed for %s: %s", device.name, exc.message)
+
+    # ---------- status ----------
+
+    def status_snapshot(self) -> StatusSnapshot:
+        """Truthful status regardless of Intiface state (for GET /status)."""
+        active = self.get_active_device()
+        if self._client is None:
+            client_state = "Not created"
+        elif self._client.connected:
+            client_state = "Connected"
+        else:
+            client_state = "Disconnected"
+        active_payload: DevicePayload | None = None
+        if active is not None:
+            active_payload = {
+                "id": active.id,
+                "name": active.name,
+                "index": active.index,
+                "actuator_count": active.actuator_count,
+                "actuator_types": active.actuator_types,
+            }
+        return {
+            "status": "ok" if self.is_connected else "error",
+            "server_running": True,
+            "server_initialized": self.is_connected,
+            "intiface_connected": self.is_connected,
+            "client_state": client_state,
+            "device_count": len(self._devices),
+            "has_devices": bool(self._devices),
+            "websocket_url": self.settings.websocket.url,
+            "active_device": active_payload,
+        }

@@ -1,129 +1,196 @@
+"""Quart application factory, lifecycle wiring, and the `buttplug-st` entry point."""
+
+from __future__ import annotations
+
+import argparse
 import asyncio
+import contextlib
 import logging
-import os
 import sys
-import platform
-from functools import partial
-import signal
-from typing import Callable, Optional, Dict, Any
+from typing import cast
 
-from quart import Quart, jsonify, Response
-from quart_cors import cors
+from pydantic import ValidationError as PydanticValidationError
+from quart import Quart, Response, jsonify
 
-from .config import Settings
-from .core import DeviceManager
-from .core.exceptions import ButtplugSTException
+# quart-cors ships incomplete type information; its return type is opaque.
+from quart_cors import cors  # pyright: ignore[reportUnknownVariableType]
+from werkzeug.exceptions import HTTPException
+
+from . import __version__
 from .api import create_blueprint
+from .api.schemas import format_validation_error
+from .config import Settings, SettingsError
+from .core.device import DeviceManager
+from .core.exceptions import ButtplugSTException
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-)
 logger = logging.getLogger(__name__)
 
-def create_app(settings: Settings) -> Quart:
-    """
-    Create and configure the Quart application
-    
-    Args:
-        settings: Application settings
-        
-    Returns:
-        Configured Quart application instance
-    """
+
+def create_app(settings: Settings, device_manager: DeviceManager | None = None) -> Quart:
+    """Build the Quart app around a single Settings instance and device manager."""
     app = Quart(__name__)
-    
-    # Enable CORS
     app = cors(app, allow_origin="*")
-    
-    # Create device manager
-    device_mgr = DeviceManager(settings)
-    
-    # Register API routes
-    api_bp = create_blueprint(device_mgr)
-    app.register_blueprint(api_bp)
-    
-    # Error handlers
+
+    device_mgr = device_manager if device_manager is not None else DeviceManager(settings)
+    app.register_blueprint(create_blueprint(device_mgr))
+
+    @app.errorhandler(PydanticValidationError)
+    async def handle_validation_error(e: PydanticValidationError) -> tuple[Response, int]:
+        return (
+            jsonify(
+                {
+                    "error": "validation_error",
+                    "detail": format_validation_error(e),
+                    "status_code": 400,
+                }
+            ),
+            400,
+        )
+
     @app.errorhandler(ButtplugSTException)
-    async def handle_buttplug_exception(e: ButtplugSTException) -> tuple[Response, int]:
-        """Handle custom ButtplugST exceptions"""
+    async def handle_domain_error(e: ButtplugSTException) -> tuple[Response, int]:
         return jsonify(e.to_dict()), e.status_code
-    
+
+    @app.errorhandler(HTTPException)
+    async def handle_http_error(e: HTTPException) -> tuple[Response, int]:
+        # Keep even unknown-route errors in the uniform JSON envelope.
+        return (
+            jsonify(
+                {
+                    "error": (e.name or "http_error").lower().replace(" ", "_"),
+                    "detail": e.description or "",
+                    "status_code": e.code or 500,
+                }
+            ),
+            e.code or 500,
+        )
+
     @app.errorhandler(Exception)
-    async def handle_generic_exception(e: Exception) -> tuple[Response, int]:
-        """Handle all other exceptions"""
-        logger.error(f"Unhandled exception: {e}", exc_info=True)
-        return jsonify({
-            "error": "internal_error",
-            "detail": str(e),
-            "status_code": 500
-        }), 500
-    
-    # Startup/Shutdown handlers
+    async def handle_unexpected_error(e: Exception) -> tuple[Response, int]:
+        logger.error("Unhandled exception: %s", e, exc_info=True)
+        return (
+            jsonify(
+                {
+                    "error": "internal_error",
+                    "detail": "An unexpected internal error occurred",
+                    "status_code": 500,
+                }
+            ),
+            500,
+        )
+
     @app.before_serving
     async def startup() -> None:
-        """Initialize the device manager before serving requests"""
-        logger.info("Starting up ButtplugST server...")
-        try:
-            await device_mgr.initialize()
-            logger.info("ButtplugST server started")
-        except Exception as e:
-            logger.error(f"Error during startup: {e}", exc_info=True)
-    
+        # Non-fatal: the server must serve HTTP even when Intiface Central is
+        # down; commands report 503 until the connection is re-established.
+        await device_mgr.start()
+
     @app.after_serving
     async def shutdown() -> None:
-        """Shut down the device manager when the server stops"""
-        logger.info("Shutting down ButtplugST server...")
         await device_mgr.shutdown()
-        logger.info("ButtplugST server stopped")
-    
-    app.device_manager = device_mgr
+
     return app
 
-def handle_signal(app: Quart, loop: asyncio.AbstractEventLoop, signal_name: str) -> None:
-    """
-    Handle termination signals
-    
-    Args:
-        app: The Quart application
-        loop: Event loop running the application
-        signal_name: Name of the received signal
-    """
-    logger.info(f"Received {signal_name}, shutting down...")
-    loop.create_task(app.shutdown())
 
-async def main() -> None:
-    """Main application entry point"""
-    # Load settings
-    settings = Settings.load()
-    
-    # Create the application
+async def run_server(settings: Settings) -> None:
+    """Create the app and serve it until cancelled."""
     app = create_app(settings)
-    
-    # Set up signal handlers for graceful shutdown
-    loop = asyncio.get_running_loop()
-    
-    # Skip signal handlers on Windows as they're not supported
-    if platform.system() != "Windows":
-        try:
-            for sig_name in ('SIGINT', 'SIGTERM'):
-                if hasattr(signal, sig_name):
-                    sig = getattr(signal, sig_name)
-                    loop.add_signal_handler(
-                        sig,
-                        partial(handle_signal, app, loop, sig_name)
-                    )
-        except NotImplementedError:
-            logger.warning("Signal handlers not supported on this platform")
-    
-    # Start the server
-    logger.info(f"Starting server on {settings.server.host}:{settings.server.port}")
     await app.run_task(
         host=settings.server.host,
         port=settings.server.port,
-        debug=settings.server.debug
+        debug=settings.server.debug,
     )
 
-if __name__ == "__main__":
-    asyncio.run(main()) 
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="buttplug-st",
+        description=(
+            "REST bridge between SillyTavern and buttplug.io devices via Intiface Central."
+        ),
+    )
+    _ = parser.add_argument(
+        "--config",
+        metavar="PATH",
+        help="TOML config file (default: packaged default.toml)",
+    )
+    _ = parser.add_argument(
+        "--host", help="HTTP host to bind (overrides config file and environment)"
+    )
+    _ = parser.add_argument(
+        "--port", type=int, help="HTTP port to bind (overrides config file and environment)"
+    )
+    _ = parser.add_argument("--debug", action="store_true", help="Enable Quart debug mode")
+    return parser
+
+
+def load_settings(argv: list[str] | None = None) -> Settings:
+    """Parse CLI arguments and resolve the single effective Settings instance.
+
+    Precedence: CLI flags > BUTTPLUG_* environment variables > --config file >
+    packaged defaults.
+    """
+    args = build_arg_parser().parse_args(argv)
+    # argparse.Namespace attributes are untyped; pin them once, here.
+    config_path = cast("str | None", getattr(args, "config", None))
+    host = cast("str | None", getattr(args, "host", None))
+    port = cast("int | None", getattr(args, "port", None))
+    debug = cast("bool", getattr(args, "debug", False))
+
+    settings = Settings.load(config_path)
+    overrides: dict[str, dict[str, object]] = {"server": {}}
+    if host is not None:
+        overrides["server"]["host"] = host
+    if port is not None:
+        overrides["server"]["port"] = port
+    if debug:
+        overrides["server"]["debug"] = True
+    settings.apply_updates(overrides)
+    return settings
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Console-script entry point. Returns a process exit code."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    try:
+        settings = load_settings(argv)
+    except SettingsError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    server_line = " ".join(
+        [
+            "server:    ",
+            f"host={settings.server.host}",
+            f"port={settings.server.port}",
+            f"debug={settings.server.debug}",
+        ]
+    )
+    websocket_line = " ".join(
+        [
+            "websocket: ",
+            f"url={settings.websocket.url}",
+            f"scan_timeout={settings.websocket.scan_timeout}",
+        ]
+    )
+    device_line = " ".join(
+        [
+            "device:    ",
+            f"default_speed={settings.device.default_speed}",
+            f"default_position={settings.device.default_position}",
+            f"default_duration={settings.device.default_duration}",
+        ]
+    )
+    print(f"ButtplugST {__version__}")
+    print(server_line)
+    print(websocket_line)
+    print(device_line)
+
+    # KeyboardInterrupt covers Ctrl+C on every platform; no loop-level
+    # signal handlers are registered (they are unsupported on Windows).
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(run_server(settings))
+    return 0
